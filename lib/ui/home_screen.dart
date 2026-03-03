@@ -3,9 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/auth_manager.dart';
 import '../core/ble_manager.dart';
-import 'device_scan_screen.dart';
-import 'auth_key_screen.dart';
-import 'debug_console.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -16,44 +14,233 @@ class HomeScreen extends StatelessWidget {
     final bleManager = context.watch<BLEManager>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Mi Band Authenticator')),
+      appBar: AppBar(
+        title: const Text('Mi Band'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
+          ),
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildStatusCard(authManager, bleManager, context),
+            // ── Status / reconnect banner ────────────────────────────
+            if (bleManager.isReconnecting) _buildReconnectBanner(),
+            if (!bleManager.isConnected && !bleManager.isReconnecting)
+              _buildDisconnectedBanner(context),
+
+            // ── Card 1: Band Info ────────────────────────────────────
+            _BandInfoCard(
+              bleManager: bleManager,
+              authManager: authManager,
+            ),
+
             const SizedBox(height: 16),
+
+            // ── Card 2: Activity ─────────────────────────────────────
             if (bleManager.authState == AuthState.authenticated)
-              _buildMetricsCard(bleManager),
-            const SizedBox(height: 24),
-            _buildActionButtons(context, bleManager),
+              _ActivityCard(bleManager: bleManager)
+            else
+              _NotAuthCard(bleManager: bleManager),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildMetricsCard(BLEManager ble) {
-    final m = ble.metrics;
+  Widget _buildReconnectBanner() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade100,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Row(
+        children: [
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          SizedBox(width: 12),
+          Text('Reconnecting to band...'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDisconnectedBanner(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.red.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.red.shade200),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.bluetooth_disabled, color: Colors.redAccent),
+          const SizedBox(width: 12),
+          const Expanded(child: Text('Band not connected')),
+          TextButton(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Card 1 — Band Info
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _BandInfoCard extends StatelessWidget {
+  final BLEManager bleManager;
+  final AuthManager authManager;
+
+  const _BandInfoCard({required this.bleManager, required this.authManager});
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = bleManager.isConnected;
+    final authState = bleManager.authState;
+    final device = bleManager.device;
+    final battery = bleManager.batteryLevel;
+
+    String authLabel;
+    Color authColor;
+    switch (authState) {
+      case AuthState.authenticating:
+        authLabel = 'Authenticating…';
+        authColor = Colors.orange;
+        break;
+      case AuthState.authenticated:
+        authLabel = 'Authenticated';
+        authColor = Colors.green;
+        break;
+      case AuthState.failed:
+        authLabel = 'Auth Failed';
+        authColor = Colors.red;
+        break;
+      default:
+        authLabel = 'Not Authenticated';
+        authColor = Colors.grey;
+    }
+
     return Card(
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(20.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Today\'s Activity',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            Row(
+              children: [
+                const Icon(Icons.watch, size: 28),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    device?.platformName.isNotEmpty == true
+                        ? device!.platformName
+                        : 'Mi Band',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                // Battery badge
+                if (battery != null)
+                  _BatteryBadge(level: battery)
+                else if (connected)
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
             ),
             const SizedBox(height: 16),
+            _InfoRow(
+              label: 'Connection',
+              value: connected ? 'Connected' : 'Disconnected',
+              color: connected ? Colors.green : Colors.red,
+            ),
+            const Divider(height: 20),
+            _InfoRow(
+              label: 'Auth',
+              value: authLabel,
+              color: authColor,
+            ),
+            if (device != null) ...[
+              const Divider(height: 20),
+              _InfoRow(
+                label: 'MAC Address',
+                value: device.remoteId.str,
+                color: Colors.blueGrey,
+              ),
+            ],
+            if (!authManager.hasKey) ...[
+              const Divider(height: 20),
+              _InfoRow(
+                label: 'Auth Key',
+                value: 'Not set — go to Settings',
+                color: Colors.orange,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Card 2 — Today's Activity
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _ActivityCard extends StatelessWidget {
+  final BLEManager bleManager;
+  const _ActivityCard({required this.bleManager});
+
+  @override
+  Widget build(BuildContext context) {
+    final m = bleManager.metrics;
+
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Today's Activity",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 _MetricTile(
                   icon: Icons.directions_walk,
                   label: 'Steps',
-                  value: '${m.steps}',
+                  value: _fmt(m.steps),
                   color: Colors.deepPurple,
                 ),
                 _MetricTile(
@@ -66,7 +253,7 @@ class HomeScreen extends StatelessWidget {
                   icon: Icons.local_fire_department,
                   label: 'Calories',
                   value: '${m.calories} kcal',
-                  color: Colors.orange,
+                  color: Colors.deepOrange,
                 ),
               ],
             ),
@@ -76,118 +263,88 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildStatusCard(
-    AuthManager auth,
-    BLEManager ble,
-    BuildContext context,
-  ) {
-    String connStatus = ble.isConnected ? "Connected" : "Disconnected";
-    Color connColor = ble.isConnected ? Colors.green : Colors.red;
-
-    String authStatus;
-    Color authColor;
-
-    switch (ble.authState) {
-      case AuthState.notAuthenticated:
-        authStatus = "Not Authenticated";
-        authColor = Colors.grey;
-        break;
-      case AuthState.authenticating:
-        authStatus = "Authenticating...";
-        authColor = Colors.yellow;
-        break;
-      case AuthState.authenticated:
-        authStatus = "Authenticated";
-        authColor = Colors.green;
-        break;
-      case AuthState.failed:
-        authStatus = "Auth Failed";
-        authColor = Colors.red;
-        break;
+  String _fmt(int n) {
+    if (n >= 1000) {
+      return '${(n / 1000).toStringAsFixed(1)}k';
     }
+    return n.toString();
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Placeholder when not yet authenticated
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _NotAuthCard extends StatelessWidget {
+  final BLEManager bleManager;
+  const _NotAuthCard({required this.bleManager});
+
+  @override
+  Widget build(BuildContext context) {
+    final isAuthenticating = bleManager.authState == AuthState.authenticating;
 
     return Card(
-      elevation: 4,
+      elevation: 2,
+      color: Colors.grey.shade100,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(24.0),
         child: Column(
           children: [
-            _InfoRow(
-              label: "Key Present",
-              value: auth.hasKey ? "Yes" : "No",
-              color: auth.hasKey ? Colors.green : Colors.red,
-            ),
-            const Divider(),
-            _InfoRow(label: "Connection", value: connStatus, color: connColor),
-            const Divider(),
-            _InfoRow(label: "Auth State", value: authStatus, color: authColor),
-            const Divider(),
-            _InfoRow(
-              label: "MAC Address",
-              value: ble.device?.remoteId.str ?? "N/A",
-              color: Colors.blueAccent,
+            if (isAuthenticating)
+              const CircularProgressIndicator()
+            else
+              Icon(Icons.lock_outline, size: 48, color: Colors.grey.shade400),
+            const SizedBox(height: 12),
+            Text(
+              isAuthenticating
+                  ? 'Authenticating with band…'
+                  : bleManager.isConnected
+                      ? 'Authentication failed.\nCheck your auth key in Settings.'
+                      : 'Connect your band to see activity data.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade600),
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _buildActionButtons(BuildContext context, BLEManager ble) {
-    return Column(
+// ──────────────────────────────────────────────────────────────────────────────
+// Shared widgets
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _BatteryBadge extends StatelessWidget {
+  final int level;
+  const _BatteryBadge({required this.level});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = level > 50
+        ? Colors.green
+        : level > 20
+            ? Colors.orange
+            : Colors.red;
+
+    final icon = level > 80
+        ? Icons.battery_full
+        : level > 50
+            ? Icons.battery_4_bar
+            : level > 20
+                ? Icons.battery_2_bar
+                : Icons.battery_1_bar;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            minimumSize: const Size(double.infinity, 50),
-          ),
-          icon: const Icon(Icons.bluetooth_searching),
-          label: const Text('Scan Devices'),
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const DeviceScanScreen()),
-            );
-          },
-        ),
-        const SizedBox(height: 12),
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            minimumSize: const Size(double.infinity, 50),
-          ),
-          icon: const Icon(Icons.key),
-          label: const Text('Update Auth Key'),
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AuthKeyScreen()),
-            );
-          },
-        ),
-        const SizedBox(height: 12),
-        if (ble.isConnected)
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(double.infinity, 50),
-              backgroundColor: Colors.redAccent,
-            ),
-            icon: const Icon(Icons.cancel),
-            label: const Text(
-              'Disconnect',
-              style: TextStyle(color: Colors.white),
-            ),
-            onPressed: () => ble.disconnect(),
-          ),
-        const SizedBox(height: 32),
-        TextButton.icon(
-          icon: const Icon(Icons.bug_report),
-          label: const Text('View Debug Log'),
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const DebugConsole()),
-            );
-          },
+        Icon(icon, color: color, size: 22),
+        const SizedBox(width: 2),
+        Text(
+          '$level%',
+          style: TextStyle(
+              color: color, fontWeight: FontWeight.bold, fontSize: 14),
         ),
       ],
     );
@@ -207,25 +364,22 @@ class _InfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 15),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+            fontSize: 15,
           ),
-          Text(
-            value,
-            style: TextStyle(
-              color: color,
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -258,10 +412,7 @@ class _MetricTile extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 12, color: Colors.grey),
-        ),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ],
     );
   }

@@ -24,8 +24,13 @@ class BLEManager extends ChangeNotifier {
   StreamSubscription<List<int>>? _charSubscription;
   StreamSubscription<List<int>>? _stepsSubscription;
   Timer? _authTimeoutTimer;
+  Timer? _reconnectTimer;
+
+  bool _isReconnecting = false;
+  bool _userDisconnected = false; // true when user explicitly disconnects
 
   BandMetrics _metrics = const BandMetrics();
+  int? _batteryLevel; // 0–100 or null if unknown
 
   bool get isConnected => _device != null && _device!.isConnected;
   bool _isAuthenticating = false;
@@ -37,12 +42,20 @@ class BLEManager extends ChangeNotifier {
   BluetoothDevice? get device => _device;
   AuthState get authState => _authState;
   bool get isAuthenticating => _isAuthenticating;
+  bool get isReconnecting => _isReconnecting;
   BandMetrics get metrics => _metrics;
+  int? get batteryLevel => _batteryLevel;
 
+  // UUIDs
   final Guid fee1ServiceUuid = Guid("0000fee1-0000-3512-2118-0009af100700");
   final Guid fec1CharUuid = Guid("0000fec1-0000-3512-2118-0009af100700");
 
+  // ---------------------------------------------------------------------------
+  // Connection
+  // ---------------------------------------------------------------------------
+
   Future<void> connect(BluetoothDevice target) async {
+    _userDisconnected = false;
     _logger.i("Connecting to ${target.remoteId}...");
     _device = target;
     notifyListeners();
@@ -74,10 +87,38 @@ class BLEManager extends ChangeNotifier {
     _charSubscription?.cancel();
     _stepsSubscription?.cancel();
     _metrics = const BandMetrics();
+    _batteryLevel = null;
     _logger.e("Device disconnected.");
+
+    if (!_userDisconnected && _device != null) {
+      _scheduleReconnect();
+    }
+  }
+
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    _isReconnecting = true;
+    notifyListeners();
+    _logger.i("Will attempt reconnect in 3 s...");
+    _reconnectTimer = Timer(const Duration(seconds: 3), () async {
+      if (_userDisconnected || _device == null) {
+        _isReconnecting = false;
+        notifyListeners();
+        return;
+      }
+      _logger.i("Reconnecting to ${_device!.remoteId}...");
+      try {
+        await _device!.connect(autoConnect: false);
+        // connection state listener will fire _handleConnected on success
+      } catch (e) {
+        _logger.e("Reconnect error: $e — retrying in 5 s");
+        _reconnectTimer = Timer(const Duration(seconds: 5), _scheduleReconnect);
+      }
+    });
   }
 
   Future<void> _handleConnected() async {
+    _isReconnecting = false;
     _logger.i("Connected successfully.");
     if (_device == null) return;
 
@@ -127,6 +168,10 @@ class BLEManager extends ChangeNotifier {
     await _startAuthHandshake();
   }
 
+  // ---------------------------------------------------------------------------
+  // Authentication
+  // ---------------------------------------------------------------------------
+
   Future<void> _startAuthHandshake() async {
     if (_isAuthenticating) return;
     if (_authChar == null || !_device!.isConnected) return;
@@ -162,12 +207,6 @@ class BLEManager extends ChangeNotifier {
       _logger.d("Auth key (hex): $authKeyHex");
       _logger.d("Auth key length: ${authKeyBytes.length} bytes");
 
-      // STEP 1: Send [0x01, 0x00] + 16-byte key
-      // The band must confirm key receipt with [0x10, 0x01, 0x01]
-      // before we request the challenge in step 2.
-      _logger
-          .i("Auth Step 1: Sending [0x01, 0x00] + auth key (18 bytes total)");
-
       _authTimeoutTimer?.cancel();
       _authTimeoutTimer = Timer(const Duration(seconds: 20), () {
         _logger.e("Auth timeout");
@@ -177,10 +216,10 @@ class BLEManager extends ChangeNotifier {
       });
 
       _authPhase = _AuthPhase.waitingForChallenge;
+      _logger
+          .i("Auth Step 1: Sending [0x01, 0x00] + auth key (18 bytes total)");
       final step1Payload = [0x01, 0x00, ...authKeyBytes];
       await safeWrite(step1Payload);
-      // Step 2 ([0x02, 0x00]) is triggered in _handleAuthResponse
-      // when the band replies [0x10, 0x01, 0x01]
     } catch (e) {
       _logger.e("Auth Handshake Error: $e");
       _isAuthenticating = false;
@@ -198,7 +237,6 @@ class BLEManager extends ChangeNotifier {
         response[0] == 0x10 &&
         response[1] == 0x01 &&
         response[2] == 0x01) {
-      // STEP 1 SUCCESS: Band accepted our key. Now request the challenge.
       _logger.i(
           "Step 1 OK: Key accepted by band. Sending Step 2: challenge request [0x02, 0x00]...");
       await safeWrite([0x02, 0x00]);
@@ -206,7 +244,6 @@ class BLEManager extends ChangeNotifier {
         response[0] == 0x10 &&
         response[1] == 0x01 &&
         response[2] == 0x04) {
-      // STEP 1 FAILED: Band rejected the key
       _authTimeoutTimer?.cancel();
       _logger.e("Step 1 FAILED: Band rejected auth key (0x10, 0x01, 0x04)");
       _failAuth();
@@ -214,7 +251,6 @@ class BLEManager extends ChangeNotifier {
         response[0] == 0x10 &&
         response[1] == 0x02 &&
         response[2] == 0x01) {
-      // STEP 2 SUCCESS: Band sent us a 16-byte random challenge
       _logger.i("Step 2 OK: Challenge received. Encrypting with Auth Key...");
       if (response.length < 19) {
         _logger.e(
@@ -248,18 +284,17 @@ class BLEManager extends ChangeNotifier {
         response[0] == 0x10 &&
         response[1] == 0x03 &&
         response[2] == 0x01) {
-      // STEP 3 SUCCESS: Auth complete!
+      // Standard V2 success
       _authTimeoutTimer?.cancel();
       _logger.i("Authentication SUCCESS!");
       _isAuthenticating = false;
       _authState = AuthState.authenticated;
       notifyListeners();
-      _subscribeToSteps();
+      _onAuthSuccess();
     } else if (response.length >= 3 &&
         response[0] == 0x10 &&
         response[1] == 0x03 &&
         response[2] == 0x04) {
-      // STEP 3 FAILED: Encryption mismatch (wrong key)
       _authTimeoutTimer?.cancel();
       _logger.e(
           "Step 3 FAILED: Encryption mismatch. The key is wrong (0x10, 0x03, 0x04)");
@@ -272,15 +307,12 @@ class BLEManager extends ChangeNotifier {
         response.length >= 16 &&
         response[0] != 0x10 &&
         !response.every((b) => b == 0xFF)) {
-      // Mi Band 6 Huami V3: the band sends 32 bytes of challenge data
-      // (two AES-ECB blocks) in a 64-byte padded packet.
-      // We must encrypt BOTH 16-byte blocks and respond with all 32 encrypted bytes.
-      _authPhase = _AuthPhase.waitingForResult; // prevent re-triggering
+      // Huami V3: raw 32-byte challenge
+      _authPhase = _AuthPhase.waitingForResult;
       _logger.i(
         "Challenge packet received (0x${response[0].toRadixString(16)}, phase=waitingForChallenge). "
         "Extracting full 32-byte challenge (blocks 0–31) and encrypting...",
       );
-      // Take the first 32 bytes — two 16-byte AES-ECB blocks
       final challenge = response.sublist(0, 32);
 
       Uint8List? keyBytes = await _storage.getAuthKeyBytes();
@@ -311,7 +343,6 @@ class BLEManager extends ChangeNotifier {
         _failAuth();
       }
     } else if (_authPhase == _AuthPhase.waitingForResult) {
-      // Any packet arriving after we sent our encrypted response.
       final hex = response
           .sublist(0, response.length < 12 ? response.length : 12)
           .map((e) => e.toRadixString(16).padLeft(2, '0'))
@@ -319,14 +350,12 @@ class BLEManager extends ChangeNotifier {
       _logger.d("Post-encrypt response: $hex...");
 
       if (response.every((b) => b == 0xFF)) {
-        // Explicit rejection
         _authTimeoutTimer?.cancel();
         _logger.e("Auth FAILED: band rejected with 0xFF.");
         _failAuth();
       } else if (response.length >= 3 &&
           response[0] == 0x10 &&
           response[2] == 0x04) {
-        // Encryption mismatch — wrong key
         _authTimeoutTimer?.cancel();
         _logger.e(
           "Auth FAILED: encryption mismatch "
@@ -334,9 +363,6 @@ class BLEManager extends ChangeNotifier {
         );
         _failAuth();
       } else {
-        // Any other response after our encrypted write means the band
-        // accepted our key and is now streaming normal BLE data.
-        // The band never disconnects on success — it just starts sending data.
         _authTimeoutTimer?.cancel();
         _logger.i(
           "Authentication SUCCESS! "
@@ -347,17 +373,21 @@ class BLEManager extends ChangeNotifier {
         _isAuthenticating = false;
         _authState = AuthState.authenticated;
         notifyListeners();
-        _subscribeToSteps();
+        _onAuthSuccess();
       }
     }
   }
 
+  // Called after either auth success path
+  void _onAuthSuccess() {
+    _subscribeToSteps();
+    _readBattery();
+  }
+
   // ---------------------------------------------------------------------------
-  // Real-time steps
+  // Real-time steps  (fee0 / 0x0007)
   // ---------------------------------------------------------------------------
 
-  /// Discover the fee0 service and subscribe to the real-time steps
-  /// characteristic (short UUID 0x0007 = 00000007-0000-3512-2118-0009af100700).
   Future<void> _subscribeToSteps() async {
     if (_device == null || !_device!.isConnected) return;
 
@@ -376,9 +406,7 @@ class BLEManager extends ChangeNotifier {
       }
 
       for (final char in fee0.characteristics) {
-        final cuuid = char.uuid.str.toLowerCase();
-        // The real-time steps characteristic has short UUID 0x0007
-        if (cuuid.contains('0007')) {
+        if (char.uuid.str.toLowerCase().contains('0007')) {
           _stepsChar = char;
           break;
         }
@@ -405,7 +433,7 @@ class BLEManager extends ChangeNotifier {
         }
       });
 
-      // Trigger an immediate read so the UI shows current values right away.
+      // Immediate read for current value
       try {
         final current = await _stepsChar!.read();
         final parsed = BandMetrics.fromStepsPacket(current);
@@ -414,12 +442,70 @@ class BLEManager extends ChangeNotifier {
           notifyListeners();
         }
       } catch (_) {
-        // read() may not be supported – that's fine, notifications will cover it.
+        // read() may not be supported; notifications will cover it
       }
     } catch (e) {
       _logger.e("Steps subscription error: $e");
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Battery level  (0x180f / 0x2a19  — standard BLE Battery Service)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _readBattery() async {
+    if (_device == null || !_device!.isConnected) return;
+
+    try {
+      final services = await _device!.discoverServices();
+      BluetoothCharacteristic? battChar;
+
+      for (final svc in services) {
+        final suuid = svc.uuid.str.toLowerCase();
+        if (suuid.contains('180f')) {
+          for (final char in svc.characteristics) {
+            if (char.uuid.str.toLowerCase().contains('2a19')) {
+              battChar = char;
+              break;
+            }
+          }
+          break;
+        }
+      }
+
+      if (battChar == null) {
+        _logger.e("Battery: 0x2a19 characteristic not found.");
+        return;
+      }
+
+      final raw = await battChar.read();
+      if (raw.isNotEmpty) {
+        _batteryLevel = raw[0].clamp(0, 100);
+        _logger.i("Battery: $_batteryLevel%");
+        notifyListeners();
+      }
+
+      // Subscribe to battery notifications if supported
+      try {
+        await battChar.setNotifyValue(true);
+        battChar.onValueReceived.listen((data) {
+          if (data.isNotEmpty) {
+            _batteryLevel = data[0].clamp(0, 100);
+            _logger.d("Battery update: $_batteryLevel%");
+            notifyListeners();
+          }
+        });
+      } catch (_) {
+        // Notifications not supported for battery — that's fine
+      }
+    } catch (e) {
+      _logger.e("Battery read error: $e");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
 
   Future<void> safeWrite(List<int> value) async {
     if (_device == null || !_device!.isConnected) {
@@ -442,7 +528,12 @@ class BLEManager extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
-    _logger.i("Disconnecting manual...");
+    _userDisconnected = true;
+    _reconnectTimer?.cancel();
+    _isReconnecting = false;
+    _logger.i("Disconnecting (user initiated)...");
     await _device?.disconnect();
+    _device = null;
+    notifyListeners();
   }
 }
