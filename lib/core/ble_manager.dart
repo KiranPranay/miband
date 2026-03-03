@@ -6,6 +6,7 @@ import 'logger.dart';
 import 'encryption.dart';
 import '../storage/secure_storage.dart';
 import 'dart:typed_data';
+import 'band_metrics.dart';
 
 enum AuthState { notAuthenticated, authenticating, authenticated, failed }
 
@@ -17,10 +18,14 @@ class BLEManager extends ChangeNotifier {
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _authChar;
+  BluetoothCharacteristic? _stepsChar;
 
   StreamSubscription<BluetoothConnectionState>? _connSubscription;
   StreamSubscription<List<int>>? _charSubscription;
+  StreamSubscription<List<int>>? _stepsSubscription;
   Timer? _authTimeoutTimer;
+
+  BandMetrics _metrics = const BandMetrics();
 
   bool get isConnected => _device != null && _device!.isConnected;
   bool _isAuthenticating = false;
@@ -32,6 +37,7 @@ class BLEManager extends ChangeNotifier {
   BluetoothDevice? get device => _device;
   AuthState get authState => _authState;
   bool get isAuthenticating => _isAuthenticating;
+  BandMetrics get metrics => _metrics;
 
   final Guid fee1ServiceUuid = Guid("0000fee1-0000-3512-2118-0009af100700");
   final Guid fec1CharUuid = Guid("0000fec1-0000-3512-2118-0009af100700");
@@ -64,7 +70,10 @@ class BLEManager extends ChangeNotifier {
     _authState = AuthState.notAuthenticated;
     _authPhase = _AuthPhase.idle;
     _authChar = null;
+    _stepsChar = null;
     _charSubscription?.cancel();
+    _stepsSubscription?.cancel();
+    _metrics = const BandMetrics();
     _logger.e("Device disconnected.");
   }
 
@@ -245,6 +254,7 @@ class BLEManager extends ChangeNotifier {
       _isAuthenticating = false;
       _authState = AuthState.authenticated;
       notifyListeners();
+      _subscribeToSteps();
     } else if (response.length >= 3 &&
         response[0] == 0x10 &&
         response[1] == 0x03 &&
@@ -337,7 +347,77 @@ class BLEManager extends ChangeNotifier {
         _isAuthenticating = false;
         _authState = AuthState.authenticated;
         notifyListeners();
+        _subscribeToSteps();
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time steps
+  // ---------------------------------------------------------------------------
+
+  /// Discover the fee0 service and subscribe to the real-time steps
+  /// characteristic (short UUID 0x0007 = 00000007-0000-3512-2118-0009af100700).
+  Future<void> _subscribeToSteps() async {
+    if (_device == null || !_device!.isConnected) return;
+
+    try {
+      final services = await _device!.discoverServices();
+      BluetoothService? fee0;
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          fee0 = svc;
+          break;
+        }
+      }
+      if (fee0 == null) {
+        _logger.e("Steps: fee0 service not found.");
+        return;
+      }
+
+      for (final char in fee0.characteristics) {
+        final cuuid = char.uuid.str.toLowerCase();
+        // The real-time steps characteristic has short UUID 0x0007
+        if (cuuid.contains('0007')) {
+          _stepsChar = char;
+          break;
+        }
+      }
+
+      if (_stepsChar == null) {
+        _logger.e("Steps: 0x0007 characteristic not found in fee0.");
+        return;
+      }
+
+      _logger.i("Steps: subscribing to 0x0007 for real-time steps...");
+      await _stepsChar!.setNotifyValue(true);
+
+      _stepsSubscription?.cancel();
+      _stepsSubscription = _stepsChar!.onValueReceived.listen((data) {
+        final parsed = BandMetrics.fromStepsPacket(data);
+        if (parsed != null) {
+          _metrics = parsed;
+          _logger.d(
+            "Steps update: ${parsed.steps} steps, "
+            "${parsed.distanceMeters} m, ${parsed.calories} kcal",
+          );
+          notifyListeners();
+        }
+      });
+
+      // Trigger an immediate read so the UI shows current values right away.
+      try {
+        final current = await _stepsChar!.read();
+        final parsed = BandMetrics.fromStepsPacket(current);
+        if (parsed != null) {
+          _metrics = parsed;
+          notifyListeners();
+        }
+      } catch (_) {
+        // read() may not be supported – that's fine, notifications will cover it.
+      }
+    } catch (e) {
+      _logger.e("Steps subscription error: $e");
     }
   }
 

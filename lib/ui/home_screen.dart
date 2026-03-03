@@ -22,8 +22,54 @@ class HomeScreen extends StatelessWidget {
         child: Column(
           children: [
             _buildStatusCard(authManager, bleManager, context),
+            const SizedBox(height: 16),
+            if (bleManager.authState == AuthState.authenticated)
+              _buildMetricsCard(bleManager),
             const SizedBox(height: 24),
             _buildActionButtons(context, bleManager),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMetricsCard(BLEManager ble) {
+    final m = ble.metrics;
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          children: [
+            const Text(
+              'Today\'s Activity',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _MetricTile(
+                  icon: Icons.directions_walk,
+                  label: 'Steps',
+                  value: '${m.steps}',
+                  color: Colors.deepPurple,
+                ),
+                _MetricTile(
+                  icon: Icons.straighten,
+                  label: 'Distance',
+                  value: '${m.distanceMeters} m',
+                  color: Colors.teal,
+                ),
+                _MetricTile(
+                  icon: Icons.local_fire_department,
+                  label: 'Calories',
+                  value: '${m.calories} kcal',
+                  color: Colors.orange,
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -180,6 +226,43 @@ class _InfoRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _MetricTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 32),
+        const SizedBox(height: 6),
+        Text(
+          value,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ],
     );
   }
 }
