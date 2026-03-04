@@ -501,51 +501,32 @@ class BLEManager extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
-  // Heart rate  (0x180D / 0x2A37)
+  // Heart rate — TODO: Mi Band 6 firmware blocks 0x2A37 CCCD writes
+  //
+  // What we confirmed works:
+  //   ✓ Auth V3 handshake via fee1/FEC1
+  //   ✓ fee0/0x0008 accepts all HR commands (GATT_SUCCESS):
+  //     - [0x06, 0x1f, 0x00, 0x01]  Enable HR connection
+  //     - [0x14, 0x01]              Set periodic interval
+  //     - [0x15, 0x00, 0x01]        Enable HR sleep measurement
+  //   ✓ BLE bonding (createBond) succeeds
+  //
+  // What's blocked:
+  //   ✗ 0x180D/0x2A37 setNotifyValue → GATT_WRITE_NOT_PERMITTED (3)
+  //     Even after: auth + bonding + HR commands + Zepp "discoverable" ON
+  //
+  // Possible next steps:
+  //   1. Study how Gadgetbridge reads HR — it may use the Huami 2021
+  //      chunked protocol (chars 0x0016/0x0017 which our band doesn't expose)
+  //      or parse HR from activity data fetches, not realtime 0x2A37.
+  //   2. Try a native Android BLE implementation (bypassing flutter_blue_plus)
+  //      to rule out library-level descriptor handling issues.
+  //   3. Check if Notify for Mi Band uses a different approach entirely.
   // ---------------------------------------------------------------------------
 
   Future<void> _subscribeToHeartRate() async {
-    if (_device == null || !_device!.isConnected) return;
-
-    try {
-      final services = await _device!.discoverServices();
-      BluetoothCharacteristic? hrChar;
-
-      for (final svc in services) {
-        if (svc.uuid.str.toLowerCase().contains('180d')) {
-          for (final char in svc.characteristics) {
-            if (char.uuid.str.toLowerCase().contains('2a37')) {
-              hrChar = char;
-              break;
-            }
-          }
-          break;
-        }
-      }
-
-      if (hrChar == null) {
-        _logger.e("Heart Rate: 0x2A37 not found in 0x180D.");
-        return;
-      }
-
-      _logger.i("Heart Rate: subscribing to 0x2A37...");
-      await hrChar.setNotifyValue(true);
-      hrChar.onValueReceived.listen((data) {
-        if (data.isEmpty) return;
-        // Byte 0 = flags. Bit 0: 0 = uint8 HR, 1 = uint16 HR
-        final isUint16 = (data[0] & 0x01) != 0;
-        final hr = isUint16 && data.length >= 3
-            ? data[1] | (data[2] << 8)
-            : data.length >= 2
-                ? data[1]
-                : 0;
-        _heartRate = hr;
-        _logger.d("Heart Rate: $hr bpm");
-        notifyListeners();
-      });
-    } catch (e) {
-      _logger.e("Heart Rate subscription error: $e");
-    }
+    // TODO: HR monitoring not yet working — see notes above.
+    _logger.d("HR: skipped (0x2A37 CCCD blocked by firmware).");
   }
 
   // ---------------------------------------------------------------------------

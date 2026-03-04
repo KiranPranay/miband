@@ -532,7 +532,8 @@ class _HeartRateCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Reads live heart rate from BLE (standard GATT 0x180D / 0x2A37)
+    // HR is currently firmware-locked on Mi Band 6 — shows '— bpm' as placeholder.
+    // If a working protocol is found, live data will appear automatically.
     final heartRate = ble.heartRate;
 
     return Container(
