@@ -33,13 +33,16 @@ class BLEManager extends ChangeNotifier {
 
   BandMetrics _metrics = const BandMetrics();
   int? _batteryLevel;
+  DateTime? _lastSyncTime;
 
   bool get isConnected => _device != null && _device!.isConnected;
   bool _isAuthenticating = false;
   AuthState _authState = AuthState.notAuthenticated;
   _AuthPhase _authPhase = _AuthPhase.idle;
 
-  BLEManager(this._logger, this._storage);
+  BLEManager(this._logger, this._storage) {
+    _loadPersistedData();
+  }
 
   BluetoothDevice? get device => _device;
   AuthState get authState => _authState;
@@ -47,6 +50,21 @@ class BLEManager extends ChangeNotifier {
   bool get isReconnecting => _isReconnecting;
   BandMetrics get metrics => _metrics;
   int? get batteryLevel => _batteryLevel;
+  DateTime? get lastSyncTime => _lastSyncTime;
+
+  // ---------------------------------------------------------------------------
+  // Persistent data
+  // ---------------------------------------------------------------------------
+
+  Future<void> _loadPersistedData() async {
+    final saved = await _storage.loadMetrics();
+    if (saved != null) {
+      _metrics = saved;
+      _logger.i("Loaded persisted metrics: ${saved.steps} steps");
+    }
+    _lastSyncTime = await _storage.loadLastSyncTime();
+    notifyListeners();
+  }
 
   // ---------------------------------------------------------------------------
   // Foreground Service helpers
@@ -152,7 +170,8 @@ class BLEManager extends ChangeNotifier {
     _stepsChar = null;
     _charSubscription?.cancel();
     _stepsSubscription?.cancel();
-    _metrics = const BandMetrics();
+    // NOTE: _metrics is intentionally NOT reset — we keep the last known values
+    // so the UI can still display historical data while disconnected.
     _batteryLevel = null;
     _logger.e("Device disconnected.");
 
@@ -451,8 +470,12 @@ class BLEManager extends ChangeNotifier {
         final parsed = BandMetrics.fromStepsPacket(data);
         if (parsed != null) {
           _metrics = parsed;
+          _lastSyncTime = DateTime.now();
           _logger.d("Steps: ${parsed.steps}, ${parsed.distanceMeters} m, "
               "${parsed.calories} kcal");
+          // Persist every update so data survives disconnects
+          _storage.saveMetrics(_metrics);
+          _storage.saveLastSyncTime(_lastSyncTime!);
           notifyListeners();
         }
       });
@@ -462,6 +485,9 @@ class BLEManager extends ChangeNotifier {
         final parsed = BandMetrics.fromStepsPacket(current);
         if (parsed != null) {
           _metrics = parsed;
+          _lastSyncTime = DateTime.now();
+          _storage.saveMetrics(_metrics);
+          _storage.saveLastSyncTime(_lastSyncTime!);
           notifyListeners();
         }
       } catch (_) {}

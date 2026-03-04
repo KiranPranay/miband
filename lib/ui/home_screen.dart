@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../core/auth_manager.dart';
 import '../core/ble_manager.dart';
 import 'settings_screen.dart';
 
@@ -10,7 +9,6 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final authManager = context.watch<AuthManager>();
     final bleManager = context.watch<BLEManager>();
 
     return Scaffold(
@@ -32,24 +30,18 @@ class HomeScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Status / reconnect banner ────────────────────────────
+            // ── Reconnecting banner ──────────────────────────────────────
             if (bleManager.isReconnecting) _buildReconnectBanner(),
-            if (!bleManager.isConnected && !bleManager.isReconnecting)
-              _buildDisconnectedBanner(context),
 
-            // ── Card 1: Band Info ────────────────────────────────────
-            _BandInfoCard(
-              bleManager: bleManager,
-              authManager: authManager,
-            ),
+            // ── Card 1: Band Info ────────────────────────────────────────
+            _BandInfoCard(bleManager: bleManager),
 
             const SizedBox(height: 16),
 
-            // ── Card 2: Activity ─────────────────────────────────────
-            if (bleManager.authState == AuthState.authenticated)
-              _ActivityCard(bleManager: bleManager)
-            else
-              _NotAuthCard(bleManager: bleManager),
+            // ── Card 2: Activity ─────────────────────────────────────────
+            // Always shown: displays live data when connected+authenticated,
+            // or last-known data with a "Last synced" label otherwise.
+            _ActivityCard(bleManager: bleManager),
           ],
         ),
       ),
@@ -77,32 +69,6 @@ class HomeScreen extends StatelessWidget {
       ),
     );
   }
-
-  Widget _buildDisconnectedBanner(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.red.shade200),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.bluetooth_disabled, color: Colors.redAccent),
-          const SizedBox(width: 12),
-          const Expanded(child: Text('Band not connected')),
-          TextButton(
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ),
-            child: const Text('Connect'),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -111,9 +77,8 @@ class HomeScreen extends StatelessWidget {
 
 class _BandInfoCard extends StatelessWidget {
   final BLEManager bleManager;
-  final AuthManager authManager;
 
-  const _BandInfoCard({required this.bleManager, required this.authManager});
+  const _BandInfoCard({required this.bleManager});
 
   @override
   Widget build(BuildContext context) {
@@ -194,14 +159,6 @@ class _BandInfoCard extends StatelessWidget {
                 color: Colors.blueGrey,
               ),
             ],
-            if (!authManager.hasKey) ...[
-              const Divider(height: 20),
-              _InfoRow(
-                label: 'Auth Key',
-                value: 'Not set — go to Settings',
-                color: Colors.orange,
-              ),
-            ],
           ],
         ),
       ),
@@ -210,7 +167,7 @@ class _BandInfoCard extends StatelessWidget {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Card 2 — Today's Activity
+// Card 2 — Today's Activity (always visible, shows last-known data)
 // ──────────────────────────────────────────────────────────────────────────────
 
 class _ActivityCard extends StatelessWidget {
@@ -220,6 +177,9 @@ class _ActivityCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final m = bleManager.metrics;
+    final isLive = bleManager.authState == AuthState.authenticated;
+    final lastSync = bleManager.lastSyncTime;
+    final hasData = m.steps > 0 || m.distanceMeters > 0 || m.calories > 0;
 
     return Card(
       elevation: 4,
@@ -229,34 +189,57 @@ class _ActivityCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              "Today's Activity",
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _MetricTile(
-                  icon: Icons.directions_walk,
-                  label: 'Steps',
-                  value: _fmt(m.steps),
-                  color: Colors.deepPurple,
+                const Text(
+                  "Today's Activity",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
-                _MetricTile(
-                  icon: Icons.straighten,
-                  label: 'Distance',
-                  value: '${m.distanceMeters} m',
-                  color: Colors.teal,
-                ),
-                _MetricTile(
-                  icon: Icons.local_fire_department,
-                  label: 'Calories',
-                  value: '${m.calories} kcal',
-                  color: Colors.deepOrange,
-                ),
+                const Spacer(),
+                // Live indicator or last-sync badge
+                if (isLive)
+                  _LiveBadge()
+                else if (lastSync != null)
+                  _LastSyncBadge(time: lastSync),
               ],
             ),
+            const SizedBox(height: 20),
+            if (!hasData && !isLive)
+              // Never had data — show a subtle empty state
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16.0),
+                child: Center(
+                  child: Text(
+                    'No activity data yet.\nConnect your band to start syncing.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                  ),
+                ),
+              )
+            else
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _MetricTile(
+                    icon: Icons.directions_walk,
+                    label: 'Steps',
+                    value: _fmt(m.steps),
+                    color: Colors.deepPurple,
+                  ),
+                  _MetricTile(
+                    icon: Icons.straighten,
+                    label: 'Distance',
+                    value: '${m.distanceMeters} m',
+                    color: Colors.teal,
+                  ),
+                  _MetricTile(
+                    icon: Icons.local_fire_department,
+                    label: 'Calories',
+                    value: '${m.calories} kcal',
+                    color: Colors.deepOrange,
+                  ),
+                ],
+              ),
           ],
         ),
       ),
@@ -272,41 +255,81 @@ class _ActivityCard extends StatelessWidget {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Placeholder when not yet authenticated
+// Live badge
 // ──────────────────────────────────────────────────────────────────────────────
 
-class _NotAuthCard extends StatelessWidget {
-  final BLEManager bleManager;
-  const _NotAuthCard({required this.bleManager});
+class _LiveBadge extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.green.shade100,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: const BoxDecoration(
+              color: Colors.green,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            'Live',
+            style: TextStyle(
+              color: Colors.green.shade700,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Last Synced badge
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _LastSyncBadge extends StatelessWidget {
+  final DateTime time;
+  const _LastSyncBadge({required this.time});
+
+  String _ago() {
+    final diff = DateTime.now().difference(time);
+    if (diff.inSeconds < 60) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isAuthenticating = bleManager.authState == AuthState.authenticating;
-
-    return Card(
-      elevation: 2,
-      color: Colors.grey.shade100,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          children: [
-            if (isAuthenticating)
-              const CircularProgressIndicator()
-            else
-              Icon(Icons.lock_outline, size: 48, color: Colors.grey.shade400),
-            const SizedBox(height: 12),
-            Text(
-              isAuthenticating
-                  ? 'Authenticating with band…'
-                  : bleManager.isConnected
-                      ? 'Authentication failed.\nCheck your auth key in Settings.'
-                      : 'Connect your band to see activity data.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey.shade600),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.history, size: 12, color: Colors.grey.shade600),
+          const SizedBox(width: 4),
+          Text(
+            'Synced ${_ago()}',
+            style: TextStyle(
+              color: Colors.grey.shade600,
+              fontSize: 11,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

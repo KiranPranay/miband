@@ -1,12 +1,21 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/logger.dart';
+import '../core/band_metrics.dart';
 
 class StorageManager {
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
   static const String _authKeyKey = "mi_band_auth_key";
   static const String _lastDeviceKey = "mi_band_last_device_id";
+
+  // SharedPreferences keys for activity metrics
+  static const String _stepsKey = "mi_band_steps";
+  static const String _distanceKey = "mi_band_distance";
+  static const String _caloriesKey = "mi_band_calories";
+  static const String _lastSyncKey = "mi_band_last_sync";
+
   final BLELogger _logger;
 
   StorageManager(this._logger);
@@ -67,6 +76,62 @@ class StorageManager {
   Future<void> clearLastDeviceId() async {
     await _storage.delete(key: _lastDeviceKey);
     _logger.d("Last device cleared.");
+  }
+
+  // ── Activity metrics ──────────────────────────────────────────────────────
+
+  /// Persists the latest activity metrics to SharedPreferences.
+  Future<void> saveMetrics(BandMetrics metrics) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_stepsKey, metrics.steps);
+      await prefs.setInt(_distanceKey, metrics.distanceMeters);
+      await prefs.setInt(_caloriesKey, metrics.calories);
+      _logger.d(
+          "Metrics saved: ${metrics.steps} steps, ${metrics.distanceMeters} m, ${metrics.calories} kcal");
+    } catch (e) {
+      _logger.e("Failed to save metrics: $e");
+    }
+  }
+
+  /// Loads persisted activity metrics. Returns null if never saved.
+  Future<BandMetrics?> loadMetrics() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final steps = prefs.getInt(_stepsKey);
+      if (steps == null) return null; // never been saved
+      final distance = prefs.getInt(_distanceKey) ?? 0;
+      final calories = prefs.getInt(_caloriesKey) ?? 0;
+      _logger.d("Metrics loaded: $steps steps, $distance m, $calories kcal");
+      return BandMetrics(
+          steps: steps, distanceMeters: distance, calories: calories);
+    } catch (e) {
+      _logger.e("Failed to load metrics: $e");
+      return null;
+    }
+  }
+
+  /// Saves the timestamp of the last successful metrics sync.
+  Future<void> saveLastSyncTime(DateTime time) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_lastSyncKey, time.millisecondsSinceEpoch);
+    } catch (e) {
+      _logger.e("Failed to save last sync time: $e");
+    }
+  }
+
+  /// Loads the timestamp of the last successful metrics sync.
+  Future<DateTime?> loadLastSyncTime() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final ms = prefs.getInt(_lastSyncKey);
+      if (ms == null) return null;
+      return DateTime.fromMillisecondsSinceEpoch(ms);
+    } catch (e) {
+      _logger.e("Failed to load last sync time: $e");
+      return null;
+    }
   }
 
   /// Converts a 32-character hex string to a 16-byte Uint8List.
