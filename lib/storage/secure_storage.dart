@@ -6,9 +6,12 @@ import '../core/logger.dart';
 class StorageManager {
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
   static const String _authKeyKey = "mi_band_auth_key";
+  static const String _lastDeviceKey = "mi_band_last_device_id";
   final BLELogger _logger;
 
   StorageManager(this._logger);
+
+  // ── Auth key ──────────────────────────────────────────────────────────────
 
   Future<void> saveAuthKey(String hexKey) async {
     try {
@@ -45,6 +48,25 @@ class StorageManager {
   Future<void> clearAuthKey() async {
     await _storage.delete(key: _authKeyKey);
     _logger.i("Auth key cleared from storage.");
+  }
+
+  // ── Last device ───────────────────────────────────────────────────────────
+
+  /// Saves the MAC address of the last successfully connected band.
+  Future<void> saveLastDeviceId(String deviceId) async {
+    await _storage.write(key: _lastDeviceKey, value: deviceId);
+    _logger.d("Last device saved: $deviceId");
+  }
+
+  /// Returns the saved device MAC, or null if none saved.
+  Future<String?> getLastDeviceId() async {
+    return await _storage.read(key: _lastDeviceKey);
+  }
+
+  /// Clears the saved device MAC (call on explicit user disconnect).
+  Future<void> clearLastDeviceId() async {
+    await _storage.delete(key: _lastDeviceKey);
+    _logger.d("Last device cleared.");
   }
 
   /// Converts a 32-character hex string to a 16-byte Uint8List.
