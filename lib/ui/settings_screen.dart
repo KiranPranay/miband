@@ -16,64 +16,69 @@ class SettingsScreen extends StatelessWidget {
     final bleManager = context.watch<BLEManager>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      backgroundColor: const Color(0xFF0F0F1A),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0F0F1A),
+        elevation: 0,
+        title: const Text(
+          'Settings',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        iconTheme: const IconThemeData(color: Colors.white70),
+      ),
       body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
-          // ── Device ───────────────────────────────────────────────
-          const _SectionHeader(title: 'Device'),
-          ListTile(
-            leading: const Icon(Icons.bluetooth_searching),
-            title: const Text('Scan & Connect'),
+          // ── Band Status Card ─────────────────────────────────────────
+          _BandStatusCard(bleManager: bleManager),
+
+          const SizedBox(height: 20),
+
+          // ── Device ───────────────────────────────────────────────────
+          _SectionHeader(title: 'Device'),
+          _SettingsTile(
+            icon: Icons.bluetooth_searching,
+            title: 'Scan & Connect',
             subtitle: bleManager.device != null
-                ? Text(
-                    bleManager.device!.remoteId.str,
-                    style: const TextStyle(fontSize: 12),
-                  )
-                : const Text('No device paired'),
-            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                ? bleManager.device!.remoteId.str
+                : 'No device paired',
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const DeviceScanScreen()),
             ),
           ),
           if (bleManager.isConnected)
-            ListTile(
-              leading: const Icon(Icons.cancel, color: Colors.redAccent),
-              title: const Text(
-                'Disconnect',
-                style: TextStyle(color: Colors.redAccent),
-              ),
-              subtitle: const Text('Stops auto-reconnect and disconnects'),
+            _SettingsTile(
+              icon: Icons.cancel,
+              iconColor: Colors.redAccent,
+              title: 'Disconnect',
+              titleColor: Colors.redAccent,
+              subtitle: 'Stops auto-reconnect',
               onTap: () => bleManager.disconnect(),
             ),
 
-          const Divider(),
+          const SizedBox(height: 8),
 
-          // ── Auth ─────────────────────────────────────────────────
-          const _SectionHeader(title: 'Authentication'),
-          ListTile(
-            leading: const Icon(Icons.key),
-            title: const Text('Auth Key'),
-            subtitle: authManager.hasKey
-                ? const Text('Key is set ✓',
-                    style: TextStyle(color: Colors.green))
-                : const Text('No key set',
-                    style: TextStyle(color: Colors.orange)),
-            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+          // ── Auth ──────────────────────────────────────────────────────
+          _SectionHeader(title: 'Authentication'),
+          _SettingsTile(
+            icon: Icons.key_rounded,
+            title: 'Auth Key',
+            subtitle: authManager.hasKey ? 'Key is set ✓' : 'No key set',
+            subtitleColor: authManager.hasKey ? Colors.green : Colors.orange,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const AuthKeyScreen()),
             ),
           ),
 
-          const Divider(),
+          const SizedBox(height: 8),
 
-          // ── Debug ─────────────────────────────────────────────────
-          const _SectionHeader(title: 'Developer'),
-          ListTile(
-            leading: const Icon(Icons.bug_report),
-            title: const Text('Debug Log'),
-            trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+          // ── Developer ────────────────────────────────────────────────
+          _SectionHeader(title: 'Developer'),
+          _SettingsTile(
+            icon: Icons.bug_report_outlined,
+            title: 'Debug Log',
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const DebugConsole()),
@@ -85,6 +90,222 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Band Status Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _BandStatusCard extends StatelessWidget {
+  final BLEManager bleManager;
+  const _BandStatusCard({required this.bleManager});
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = bleManager.isConnected;
+    final authState = bleManager.authState;
+    final device = bleManager.device;
+    final battery = bleManager.batteryLevel;
+
+    String authLabel;
+    Color authColor;
+    switch (authState) {
+      case AuthState.authenticating:
+        authLabel = 'Authenticating…';
+        authColor = Colors.orange;
+        break;
+      case AuthState.authenticated:
+        authLabel = 'Authenticated';
+        authColor = Colors.green;
+        break;
+      case AuthState.failed:
+        authLabel = 'Failed';
+        authColor = Colors.red;
+        break;
+      default:
+        authLabel = 'Not Authenticated';
+        authColor = Colors.grey;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: const Color(0xFF1A1A2E),
+        border: Border.all(
+          color: connected
+              ? Colors.green.withOpacity(0.3)
+              : Colors.white.withOpacity(0.08),
+        ),
+      ),
+      child: Column(
+        children: [
+          // ── Top row: name + battery ──────────────────────────────
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.07),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.watch, color: Colors.white70, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      device?.platformName.isNotEmpty == true
+                          ? device!.platformName
+                          : 'Mi Band',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    if (device != null)
+                      Text(
+                        device.remoteId.str,
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (battery != null)
+                _BatteryWidget(level: battery)
+              else if (connected)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white38),
+                ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+          Divider(color: Colors.white.withOpacity(0.07), height: 1),
+          const SizedBox(height: 16),
+
+          // ── Status rows ──────────────────────────────────────────
+          Row(
+            children: [
+              Expanded(
+                child: _StatusPill(
+                  label: 'Connection',
+                  value: connected ? 'Connected' : 'Disconnected',
+                  color: connected ? Colors.green : Colors.red,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _StatusPill(
+                  label: 'Auth',
+                  value: authLabel,
+                  color: authColor,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color color;
+  const _StatusPill({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: color.withOpacity(0.7),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BatteryWidget extends StatelessWidget {
+  final int level;
+  const _BatteryWidget({required this.level});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = level > 50
+        ? Colors.green
+        : level > 20
+            ? Colors.orange
+            : Colors.red;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          level > 80
+              ? Icons.battery_full
+              : level > 50
+                  ? Icons.battery_4_bar
+                  : level > 20
+                      ? Icons.battery_2_bar
+                      : Icons.battery_1_bar,
+          color: color,
+          size: 20,
+        ),
+        const SizedBox(width: 2),
+        Text(
+          '$level%',
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Shared widgets
+// ──────────────────────────────────────────────────────────────────────────────
+
 class _SectionHeader extends StatelessWidget {
   final String title;
   const _SectionHeader({required this.title});
@@ -92,15 +313,70 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
       child: Text(
         title.toUpperCase(),
         style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          color: Theme.of(context).colorScheme.primary,
-          letterSpacing: 1.2,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Theme.of(context).colorScheme.primary.withOpacity(0.85),
+          letterSpacing: 1.4,
         ),
+      ),
+    );
+  }
+}
+
+class _SettingsTile extends StatelessWidget {
+  final IconData icon;
+  final Color? iconColor;
+  final String title;
+  final Color? titleColor;
+  final String? subtitle;
+  final Color? subtitleColor;
+  final VoidCallback onTap;
+
+  const _SettingsTile({
+    required this.icon,
+    this.iconColor,
+    required this.title,
+    this.titleColor,
+    this.subtitle,
+    this.subtitleColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: ListTile(
+        leading: Icon(icon, color: iconColor ?? Colors.white60, size: 22),
+        title: Text(
+          title,
+          style: TextStyle(
+            color: titleColor ?? Colors.white,
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        subtitle: subtitle != null
+            ? Text(
+                subtitle!,
+                style: TextStyle(
+                  color: subtitleColor ?? Colors.white38,
+                  fontSize: 12,
+                ),
+              )
+            : null,
+        trailing:
+            const Icon(Icons.chevron_right, color: Colors.white24, size: 20),
+        onTap: onTap,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
     );
   }

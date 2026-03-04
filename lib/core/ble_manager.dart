@@ -33,6 +33,7 @@ class BLEManager extends ChangeNotifier {
 
   BandMetrics _metrics = const BandMetrics();
   int? _batteryLevel;
+  int? _heartRate;
   DateTime? _lastSyncTime;
 
   bool get isConnected => _device != null && _device!.isConnected;
@@ -50,6 +51,7 @@ class BLEManager extends ChangeNotifier {
   bool get isReconnecting => _isReconnecting;
   BandMetrics get metrics => _metrics;
   int? get batteryLevel => _batteryLevel;
+  int? get heartRate => _heartRate;
   DateTime? get lastSyncTime => _lastSyncTime;
 
   // ---------------------------------------------------------------------------
@@ -173,6 +175,7 @@ class BLEManager extends ChangeNotifier {
     // NOTE: _metrics is intentionally NOT reset — we keep the last known values
     // so the UI can still display historical data while disconnected.
     _batteryLevel = null;
+    _heartRate = null;
     _logger.e("Device disconnected.");
 
     _stopForegroundService();
@@ -429,6 +432,7 @@ class BLEManager extends ChangeNotifier {
     _updateForegroundNotification('Connected & authenticated');
     _subscribeToSteps();
     _readBattery();
+    _subscribeToHeartRate();
   }
 
   // ---------------------------------------------------------------------------
@@ -493,6 +497,54 @@ class BLEManager extends ChangeNotifier {
       } catch (_) {}
     } catch (e) {
       _logger.e("Steps subscription error: $e");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Heart rate  (0x180D / 0x2A37)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _subscribeToHeartRate() async {
+    if (_device == null || !_device!.isConnected) return;
+
+    try {
+      final services = await _device!.discoverServices();
+      BluetoothCharacteristic? hrChar;
+
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('180d')) {
+          for (final char in svc.characteristics) {
+            if (char.uuid.str.toLowerCase().contains('2a37')) {
+              hrChar = char;
+              break;
+            }
+          }
+          break;
+        }
+      }
+
+      if (hrChar == null) {
+        _logger.e("Heart Rate: 0x2A37 not found in 0x180D.");
+        return;
+      }
+
+      _logger.i("Heart Rate: subscribing to 0x2A37...");
+      await hrChar.setNotifyValue(true);
+      hrChar.onValueReceived.listen((data) {
+        if (data.isEmpty) return;
+        // Byte 0 = flags. Bit 0: 0 = uint8 HR, 1 = uint16 HR
+        final isUint16 = (data[0] & 0x01) != 0;
+        final hr = isUint16 && data.length >= 3
+            ? data[1] | (data[2] << 8)
+            : data.length >= 2
+                ? data[1]
+                : 0;
+        _heartRate = hr;
+        _logger.d("Heart Rate: $hr bpm");
+        notifyListeners();
+      });
+    } catch (e) {
+      _logger.e("Heart Rate subscription error: $e");
     }
   }
 
