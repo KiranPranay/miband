@@ -5,10 +5,26 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'logger.dart';
 import 'encryption.dart';
-import 'foreground_task_handler.dart';
 import '../storage/secure_storage.dart';
 import 'dart:typed_data';
 import 'band_metrics.dart';
+import 'activity_fetcher.dart';
+import '../storage/activity_store.dart';
+
+// Top-level callback required by flutter_foreground_task
+@pragma('vm:entry-point')
+void startCallback() {
+  FlutterForegroundTask.setTaskHandler(MyTaskHandler());
+}
+
+class MyTaskHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  @override
+  void onRepeatEvent(DateTime timestamp) {}
+  @override
+  Future<void> onDestroy(DateTime timestamp) async {}
+}
 
 enum AuthState { notAuthenticated, authenticating, authenticated, failed }
 
@@ -36,6 +52,10 @@ class BLEManager extends ChangeNotifier {
   int? _heartRate;
   DateTime? _lastSyncTime;
 
+  ActivityFetcher? _activityFetcher;
+  final ActivityStore activityStore = ActivityStore();
+  bool _isFetchingActivity = false;
+
   bool get isConnected => _device != null && _device!.isConnected;
   bool _isAuthenticating = false;
   AuthState _authState = AuthState.notAuthenticated;
@@ -43,6 +63,7 @@ class BLEManager extends ChangeNotifier {
 
   BLEManager(this._logger, this._storage) {
     _loadPersistedData();
+    activityStore.load();
   }
 
   BluetoothDevice? get device => _device;
@@ -53,6 +74,7 @@ class BLEManager extends ChangeNotifier {
   int? get batteryLevel => _batteryLevel;
   int? get heartRate => _heartRate;
   DateTime? get lastSyncTime => _lastSyncTime;
+  bool get isFetchingActivity => _isFetchingActivity;
 
   // ---------------------------------------------------------------------------
   // Persistent data
@@ -147,6 +169,8 @@ class BLEManager extends ChangeNotifier {
     notifyListeners();
 
     _connSubscription?.cancel();
+    _reconnectTimer?.cancel();
+    _isReconnecting = false;
     _connSubscription = target.connectionState.listen((state) {
       _logger.i("Connection state: $state");
       if (state == BluetoothConnectionState.disconnected) {
@@ -207,6 +231,7 @@ class BLEManager extends ChangeNotifier {
   }
 
   Future<void> _handleConnected() async {
+    _reconnectTimer?.cancel();
     _isReconnecting = false;
     _logger.i("Connected successfully.");
     if (_device == null) return;
@@ -259,6 +284,10 @@ class BLEManager extends ChangeNotifier {
     }
 
     _logger.i("Found FEC1 characteristic. Starting auth handshake...");
+
+    // Proactively subscribe to status/init chars before auth success
+    await _subscribeToMissingNotifications();
+
     await _startAuthHandshake();
   }
 
@@ -428,11 +457,162 @@ class BLEManager extends ChangeNotifier {
     }
   }
 
-  void _onAuthSuccess() {
+  void _onAuthSuccess() async {
     _updateForegroundNotification('Connected & authenticated');
-    _subscribeToSteps();
-    _readBattery();
-    _subscribeToHeartRate();
+
+    // Step 1: Sync time (critical for some bands to enable other features)
+    await _syncTime();
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    // Step 2: Initialize display & settings
+    await _setDateDisplay();
+    await _setTimeFormat();
+    await _setUserInfo();
+    await _setFitnessGoal(10000); // 10k steps default
+
+    // Step 3: Subscriptions
+    await _subscribeToSteps();
+    await _readBattery();
+    await _subscribeToHeartRate();
+
+    await Future.delayed(const Duration(seconds: 2));
+
+    // Step 4: Initial fetch
+    _fetchActivityData();
+  }
+
+  Future<void> _syncTime() async {
+    if (_device == null || !_device!.isConnected) return;
+
+    // Find the current time characteristic (0x2A2B in fee0)
+    BluetoothCharacteristic? timeChar;
+    try {
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          for (final c in svc.characteristics) {
+            if (c.uuid.str.toLowerCase().contains('2a2b')) {
+              timeChar = c;
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      _logger.e("TimeSync discovery failed: $e");
+    }
+
+    if (timeChar == null) {
+      _logger.d("TimeSync: characteristic 0x2A2B not found, skipping.");
+      return;
+    }
+
+    final now = DateTime.now();
+    final dayOfWeek = now.weekday == 7 ? 7 : now.weekday; // matches GB logic
+
+    // Gadgetbridge format for Huami (11 bytes total)
+    // year_lo, year_hi, month, day, hour, minute, second, dayOfWeek, fractions256, adjustReason, tzQuarters
+    final tzOffsetMinutes = now.timeZoneOffset.inMinutes;
+    final tzQuarters = (tzOffsetMinutes / 15).floor();
+
+    final cmd = [
+      now.year & 0xFF,
+      (now.year >> 8) & 0xFF,
+      now.month,
+      now.day,
+      now.hour,
+      now.minute,
+      now.second,
+      dayOfWeek,
+      0x00, // fractions256
+      0x00, // adjust reason
+      tzQuarters & 0xFF,
+    ];
+
+    try {
+      _logger.i(
+          "TimeSync: syncing band clock to $now (0x2A2B) with ${cmd.length} bytes");
+      await timeChar.write(cmd, withoutResponse: false);
+    } catch (e) {
+      _logger.e("TimeSync failed: $e");
+    }
+  }
+
+  Future<void> _setFitnessGoal(int steps) async {
+    if (_device == null || !_device!.isConnected) return;
+    try {
+      BluetoothCharacteristic? configChar;
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          for (final c in svc.characteristics) {
+            if (c.uuid.str.toLowerCase().contains('0003')) {
+              configChar = c;
+              break;
+            }
+          }
+        }
+      }
+      if (configChar != null) {
+        _logger.i("Setting fitness goal: $steps steps...");
+        // Command: 0x10, 0x0, 0x0, steps_lo, steps_hi, 0, 0
+        final cmd = [
+          0x10,
+          0x00,
+          0x00,
+          steps & 0xff,
+          (steps >> 8) & 0xff,
+          0x00,
+          0x00
+        ];
+        await configChar.write(cmd, withoutResponse: true);
+      }
+    } catch (e) {
+      _logger.e("Failed to set fitness goal: $e");
+    }
+  }
+
+  Future<void> _fetchActivityData() async {
+    if (_device == null || !_device!.isConnected) return;
+
+    _isFetchingActivity = true;
+    notifyListeners();
+
+    try {
+      _activityFetcher = ActivityFetcher(_logger, _device!);
+      final ok = await _activityFetcher!.init();
+      if (!ok) {
+        _logger.e('Activity fetch: init failed');
+        return;
+      }
+
+      // Fetch last 24h of activity data (or since last sync)
+      final since = DateTime.now().subtract(const Duration(days: 1));
+      _logger.i('Activity fetch: requesting since $since');
+
+      final samples = await _activityFetcher!.fetchActivityData(since);
+      if (samples.isNotEmpty) {
+        activityStore.addSamples(samples);
+        _logger.i('Activity fetch: got ${samples.length} samples');
+      } else {
+        _logger.i('Activity fetch: no new samples');
+      }
+
+      // Try SPO2 fetch
+      final spo2 = await _activityFetcher!.fetchSpo2(since);
+      if (spo2.isNotEmpty) {
+        activityStore.addSpo2Readings(spo2);
+        _logger.i('SPO2 fetch: got ${spo2.length} readings');
+      }
+
+      // Persist
+      await activityStore.save();
+    } catch (e) {
+      _logger.e('Activity fetch error: $e');
+    } finally {
+      _isFetchingActivity = false;
+      notifyListeners();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -484,19 +664,129 @@ class BLEManager extends ChangeNotifier {
         }
       });
 
-      try {
-        final current = await _stepsChar!.read();
-        final parsed = BandMetrics.fromStepsPacket(current);
-        if (parsed != null) {
-          _metrics = parsed;
-          _lastSyncTime = DateTime.now();
-          _storage.saveMetrics(_metrics);
-          _storage.saveLastSyncTime(_lastSyncTime!);
-          notifyListeners();
-        }
-      } catch (_) {}
+      // Note: 0x0007 is often notify-only on Mi Band 6.
+      // We rely on the listener above for updates.
     } catch (e) {
       _logger.e("Steps subscription error: $e");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Missing Notifications from Gadgetbridge Phase2/3
+  // ---------------------------------------------------------------------------
+
+  Future<void> _subscribeToMissingNotifications() async {
+    if (_device == null || !_device!.isConnected) return;
+    try {
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          for (final char in svc.characteristics) {
+            final cu = char.uuid.str.toLowerCase();
+            // Subscribing to 0x0003 (config), 0x0010 (device events), 0x000F (notifs)
+            if (cu.contains('0003') ||
+                cu.contains('000f') ||
+                cu.contains('0010')) {
+              _logger.i("Subscribing to init characteristic $cu...");
+              await char.setNotifyValue(true);
+              char.onValueReceived.listen((data) {
+                _logger.d(
+                    "Init Char $cu data: ${data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}");
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      _logger.e("Init chars subscription failed: $e");
+    }
+  }
+
+  Future<void> _setDateDisplay() async {
+    await _writeConfig([0x06, 0x0a, 0x00, 0x03], "date display");
+  }
+
+  Future<void> _setTimeFormat() async {
+    // 24h format: 0x06, 0x02, 0x00, 0x01
+    await _writeConfig([0x06, 0x02, 0x00, 0x01], "24h time format");
+  }
+
+  Future<void> _writeConfig(List<int> cmd, String label) async {
+    if (_device == null || !_device!.isConnected) return;
+    try {
+      BluetoothCharacteristic? configChar;
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          for (final c in svc.characteristics) {
+            if (c.uuid.str.toLowerCase().contains('0003')) {
+              configChar = c;
+              break;
+            }
+          }
+        }
+      }
+      if (configChar != null) {
+        _logger.i("Setting $label via 0003...");
+        await configChar.write(cmd, withoutResponse: false);
+      }
+    } catch (e) {
+      _logger.e("Failed to set $label: $e");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Set User Info (0x4f to 0x0008)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _setUserInfo() async {
+    if (_device == null || !_device!.isConnected) return;
+    try {
+      BluetoothCharacteristic? userChar;
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (svc.uuid.str.toLowerCase().contains('fee0')) {
+          for (final char in svc.characteristics) {
+            if (char.uuid.str.toLowerCase().contains('0008')) {
+              userChar = char;
+              break;
+            }
+          }
+        }
+      }
+      if (userChar != null) {
+        _logger.i("Sending user info to 0x0008...");
+        final year = 1990;
+        final month = 1;
+        final day = 1;
+        final sex = 0; // 0=male, 1=female, 2=other
+        final height = 175;
+        final weight200 = 70 * 200;
+        final userid = 12345678;
+
+        final bytes = [
+          0x4f,
+          0x00,
+          0x00,
+          year & 0xff,
+          (year >> 8) & 0xff,
+          month,
+          day,
+          sex,
+          height & 0xff,
+          (height >> 8) & 0xff,
+          weight200 & 0xff,
+          (weight200 >> 8) & 0xff,
+          userid & 0xff,
+          (userid >> 8) & 0xff,
+          (userid >> 16) & 0xff,
+          (userid >> 24) & 0xff
+        ];
+        // Send without response for configuration
+        await userChar.write(bytes, withoutResponse: false);
+      }
+    } catch (e) {
+      _logger.e("Failed to set user info: $e");
     }
   }
 

@@ -81,6 +81,43 @@ class HomeScreen extends StatelessWidget {
 
             const SizedBox(height: 14),
 
+            // ── Activity fetching indicator ──────────────────────────────
+            if (ble.isFetchingActivity)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white38,
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Text('Syncing activity data...',
+                        style: TextStyle(color: Colors.white38, fontSize: 12)),
+                  ],
+                ),
+              ),
+
+            // ── Hourly Steps Chart ───────────────────────────────────────
+            _HourlyStepsCard(ble: ble),
+
+            const SizedBox(height: 14),
+
+            // ── Sleep Analysis Card ──────────────────────────────────────
+            _SleepCard(ble: ble),
+
+            const SizedBox(height: 14),
+
+            // ── SPO2 Card ────────────────────────────────────────────────
+            _Spo2Card(ble: ble),
+
+            const SizedBox(height: 14),
+
             // ── Last Sync Info ───────────────────────────────────────────
             if (ble.lastSyncTime != null) _SyncFooter(time: ble.lastSyncTime!),
           ],
@@ -679,4 +716,383 @@ class _SyncFooter extends StatelessWidget {
       ),
     );
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Hourly Steps Chart Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _HourlyStepsCard extends StatelessWidget {
+  final BLEManager ble;
+  const _HourlyStepsCard({required this.ble});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final hourly = ble.activityStore.getStepsByHour(today);
+    final maxSteps = hourly.fold<int>(0, (m, h) => h.steps > m ? h.steps : m);
+    final hasData = maxSteps > 0;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1B2838), Color(0xFF0F1923)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bar_chart_rounded, color: Color(0xFF4FC3F7), size: 20),
+              const SizedBox(width: 8),
+              const Text('Steps Today',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (!hasData)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Text('No step data yet',
+                    style: TextStyle(color: Colors.white30, fontSize: 13)),
+              ),
+            )
+          else
+            SizedBox(
+              height: 100,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: List.generate(24, (h) {
+                  final steps = hourly[h].steps;
+                  final ratio = maxSteps > 0 ? steps / maxSteps : 0.0;
+                  final isNow = h == today.hour;
+                  return Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 1),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Container(
+                            height: (ratio * 70).clamp(2.0, 70.0),
+                            decoration: BoxDecoration(
+                              color: isNow
+                                  ? const Color(0xFF4FC3F7)
+                                  : steps > 0
+                                      ? const Color(0xFF4FC3F7).withOpacity(0.5)
+                                      : Colors.white10,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          if (h % 6 == 0)
+                            Text('${h}',
+                                style: const TextStyle(
+                                    color: Colors.white30, fontSize: 8)),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Sleep Analysis Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _SleepCard extends StatelessWidget {
+  final BLEManager ble;
+  const _SleepCard({required this.ble});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final sessions = ble.activityStore.getSleepSessions(today);
+    final hasData = sessions.isNotEmpty;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1A1040), Color(0xFF0D0820)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bedtime_rounded, color: Color(0xFFB388FF), size: 20),
+              const SizedBox(width: 8),
+              const Text('Sleep',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+              const Spacer(),
+              if (hasData)
+                Text(sessions.first.durationString,
+                    style: const TextStyle(
+                        color: Color(0xFFB388FF),
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (!hasData)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Text('No sleep data yet',
+                    style: TextStyle(color: Colors.white30, fontSize: 13)),
+              ),
+            )
+          else ...[
+            // Sleep stage breakdown
+            _SleepStageRow(
+                label: 'Deep',
+                minutes: sessions.first.deepMinutes,
+                color: const Color(0xFF4527A0),
+                total: sessions.first.totalMinutes),
+            const SizedBox(height: 6),
+            _SleepStageRow(
+                label: 'Light',
+                minutes: sessions.first.lightMinutes,
+                color: const Color(0xFF7E57C2),
+                total: sessions.first.totalMinutes),
+            const SizedBox(height: 6),
+            _SleepStageRow(
+                label: 'REM',
+                minutes: sessions.first.remMinutes,
+                color: const Color(0xFFCE93D8),
+                total: sessions.first.totalMinutes),
+            const SizedBox(height: 10),
+            // Bed/wake times
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                _SleepTimeChip(
+                    icon: Icons.airline_seat_flat,
+                    label: 'Bedtime',
+                    time: sessions.first.bedtime),
+                _SleepTimeChip(
+                    icon: Icons.wb_sunny_outlined,
+                    label: 'Wake up',
+                    time: sessions.first.wakeTime),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SleepStageRow extends StatelessWidget {
+  final String label;
+  final int minutes;
+  final Color color;
+  final int total;
+  const _SleepStageRow(
+      {required this.label,
+      required this.minutes,
+      required this.color,
+      required this.total});
+
+  @override
+  Widget build(BuildContext context) {
+    final ratio = total > 0 ? minutes / total : 0.0;
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return Row(
+      children: [
+        SizedBox(
+            width: 40,
+            child: Text(label, style: TextStyle(color: color, fontSize: 11))),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Container(
+            height: 8,
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              widthFactor: ratio.clamp(0.0, 1.0),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+            width: 40,
+            child: Text('${h}h ${m}m',
+                style: const TextStyle(color: Colors.white54, fontSize: 11),
+                textAlign: TextAlign.right)),
+      ],
+    );
+  }
+}
+
+class _SleepTimeChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final DateTime time;
+  const _SleepTimeChip(
+      {required this.icon, required this.label, required this.time});
+
+  @override
+  Widget build(BuildContext context) {
+    final h = time.hour.toString().padLeft(2, '0');
+    final m = time.minute.toString().padLeft(2, '0');
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: Colors.white38),
+        const SizedBox(width: 4),
+        Text('$label $h:$m',
+            style: const TextStyle(color: Colors.white54, fontSize: 11)),
+      ],
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SPO2 Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _Spo2Card extends StatelessWidget {
+  final BLEManager ble;
+  const _Spo2Card({required this.ble});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final readings = ble.activityStore.getSpo2ForDate(today);
+    final hasData = readings.isNotEmpty;
+    final latest = hasData ? readings.last : null;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1B3030), Color(0xFF0C1A1A)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bloodtype_rounded, color: Color(0xFF80CBC4), size: 20),
+              const SizedBox(width: 8),
+              const Text('SpO₂',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+              const Spacer(),
+              if (hasData)
+                Text('${latest!.value}%',
+                    style: TextStyle(
+                        color: latest.value >= 95
+                            ? const Color(0xFF80CBC4)
+                            : Colors.orangeAccent,
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (!hasData)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('No SpO₂ data yet',
+                    style: TextStyle(color: Colors.white30, fontSize: 13)),
+              ),
+            )
+          else ...[
+            Text(
+              'Latest reading at '
+              '${latest!.timestamp.hour.toString().padLeft(2, '0')}:'
+              '${latest.timestamp.minute.toString().padLeft(2, '0')}',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+            const SizedBox(height: 12),
+            // Mini sparkline of today's readings
+            SizedBox(
+              height: 40,
+              child: CustomPaint(
+                size: const Size(double.infinity, 40),
+                painter: _Spo2ChartPainter(
+                    readings.map((r) => r.value.toDouble()).toList()),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _Spo2ChartPainter extends CustomPainter {
+  final List<double> values;
+  _Spo2ChartPainter(this.values);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.isEmpty) return;
+
+    final paint = Paint()
+      ..color = const Color(0xFF80CBC4)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final minV = values.reduce((a, b) => a < b ? a : b).clamp(85.0, 100.0);
+    final maxV = values.reduce((a, b) => a > b ? a : b).clamp(85.0, 100.0);
+    final range = (maxV - minV).clamp(1.0, 15.0);
+
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = values.length == 1
+          ? size.width / 2
+          : i / (values.length - 1) * size.width;
+      final y = size.height - ((values[i] - minV) / range * size.height);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
