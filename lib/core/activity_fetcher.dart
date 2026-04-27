@@ -116,21 +116,32 @@ class ActivityFetcher {
   }
 
   Future<List<HeartRateReading>> fetchHeartRateHistory(DateTime since) async {
-    await fetchRawData(0x02, since);
+    // HR history type = 0x0D (13) as seen in decompiled Notify source
+    await fetchRawData(0x0D, since);
     return _parseHeartRateData();
   }
 
   List<int> _buildFetchCommand(int type, DateTime since) {
-    final tsSec = since.millisecondsSinceEpoch ~/ 1000;
+    // Format confirmed from decompiled Notify app (x5/e.java):
+    // [0x01, type, year_lo, year_hi, month(1-based), day, hour, minute, 0x00, tzQuarters]
+    final year = since.year;
+    final month = since.month;      // 1-based, Calendar.get(2)+1
+    final day = since.day;          // day of month
+    final hour = since.hour;
+    final minute = since.minute;
+    final tzQuarters = since.timeZoneOffset.inMinutes ~/ 15;
+
     return [
       0x01,
       type,
-      tsSec & 0xFF,
-      (tsSec >> 8) & 0xFF,
-      (tsSec >> 16) & 0xFF,
-      (tsSec >> 24) & 0xFF,
+      year & 0xFF,
+      (year >> 8) & 0xFF,
+      month,
+      day,
+      hour,
+      minute,
       0x00,
-      0x08,
+      tzQuarters & 0xFF,
     ];
   }
 
@@ -229,13 +240,9 @@ class ActivityFetcher {
     _dataBuffer.addAll(payload);
     _logger
         .d('ActivityFetcher DATA: ${data.length} bytes (counter: ${data[0]})');
-
-    // ACK packet and request next chunk
-    if (_activityControl != null) {
-      _activityControl!.write([0x02], withoutResponse: true).catchError((e) {
-        _logger.e('ActivityFetcher: failed to send chunk ACK: $e');
-      });
-    }
+    // NOTE: No per-chunk ACK is sent here.
+    // The band streams all data continuously after the single [0x02] trigger.
+    // Sending [0x02] per packet would confuse the protocol and restart the transfer.
   }
 
   void _completeFetch() {
