@@ -118,6 +118,11 @@ class HomeScreen extends StatelessWidget {
 
             const SizedBox(height: 14),
 
+            // ── Alert Tests ──────────────────────────────────────────────
+            _AlertsTestCard(ble: ble),
+
+            const SizedBox(height: 14),
+
             // ── Last Sync Info ───────────────────────────────────────────
             if (ble.lastSyncTime != null) _SyncFooter(time: ble.lastSyncTime!),
           ],
@@ -1095,4 +1100,80 @@ class _Spo2ChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Alerts Test Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+class _AlertsTestCard extends StatelessWidget {
+  final BLEManager ble;
+  const _AlertsTestCard({required this.ble});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1B2838),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.notifications_active_rounded, color: Color(0xFF4FC3F7), size: 20),
+              SizedBox(width: 8),
+              Text('Alert Tests',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () {
+                  ble.alertManager.sendIncomingCall('Mom');
+                },
+                icon: const Icon(Icons.call, size: 16),
+                label: const Text('Call'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green.withOpacity(0.2),
+                  foregroundColor: Colors.greenAccent,
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: () {
+                  ble.alertManager.sendSms('Alice', 'Hey, what time are we meeting?');
+                },
+                icon: const Icon(Icons.message, size: 16),
+                label: const Text('SMS'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue.withOpacity(0.2),
+                  foregroundColor: Colors.lightBlueAccent,
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: () {
+                  ble.alertManager.sendAppNotification('WhatsApp', 'Bob', 'Check out this picture!');
+                },
+                icon: const Icon(Icons.app_shortcut, size: 16),
+                label: const Text('App'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purple.withOpacity(0.2),
+                  foregroundColor: Colors.purpleAccent,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }

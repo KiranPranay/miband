@@ -10,6 +10,7 @@ import 'dart:typed_data';
 import 'band_metrics.dart';
 import 'activity_fetcher.dart';
 import '../storage/activity_store.dart';
+import 'alert_manager.dart';
 
 // Top-level callback required by flutter_foreground_task
 @pragma('vm:entry-point')
@@ -37,6 +38,7 @@ class BLEManager extends ChangeNotifier {
   BluetoothDevice? _device;
   BluetoothCharacteristic? _authChar;
   BluetoothCharacteristic? _stepsChar;
+  BluetoothCharacteristic? _alertChar;
 
   StreamSubscription<BluetoothConnectionState>? _connSubscription;
   StreamSubscription<List<int>>? _charSubscription;
@@ -54,6 +56,7 @@ class BLEManager extends ChangeNotifier {
 
   ActivityFetcher? _activityFetcher;
   final ActivityStore activityStore = ActivityStore();
+  final AlertManager alertManager = AlertManager();
   bool _isFetchingActivity = false;
 
   bool get isConnected => _device != null && _device!.isConnected;
@@ -252,10 +255,21 @@ class BLEManager extends ChangeNotifier {
     for (var svc in services) {
       final uuid = svc.uuid.str.toLowerCase();
       _logger.d("SERVICE UUID: $uuid");
+      
+      // Discover Custom Alert Service (fee0)
+      if (uuid.contains("fee0")) {
+        for (var char in svc.characteristics) {
+          if (char.uuid.str.toLowerCase() == "00000020-0000-3512-2118-0009af100700") {
+            _alertChar = char;
+            alertManager.setCharacteristic(_alertChar);
+            _logger.i("Found Custom Alert Characteristic (0x0020)");
+          }
+        }
+      }
+
       if (uuid.contains("fee1")) {
         _logger.i("FEE1 FOUND");
         authService = svc;
-        break;
       }
     }
 
