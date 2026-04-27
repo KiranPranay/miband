@@ -821,8 +821,8 @@ class _SleepCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final today = DateTime.now();
-    final sessions = ble.activityStore.getSleepSessions(today);
-    final hasData = sessions.isNotEmpty;
+    final sleepDay = ble.activityStore.getSleepForDate(today);
+    final hasData = sleepDay != null && sleepDay.intervals.isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -848,7 +848,7 @@ class _SleepCard extends StatelessWidget {
                       fontWeight: FontWeight.w600)),
               const Spacer(),
               if (hasData)
-                Text(sessions.first.durationString,
+                Text(sleepDay!.durationString,
                     style: const TextStyle(
                         color: Color(0xFFB388FF),
                         fontSize: 18,
@@ -868,21 +868,21 @@ class _SleepCard extends StatelessWidget {
             // Sleep stage breakdown
             _SleepStageRow(
                 label: 'Deep',
-                minutes: sessions.first.deepMinutes,
+                minutes: sleepDay!.totalDeepMinutes,
                 color: const Color(0xFF4527A0),
-                total: sessions.first.totalMinutes),
+                total: sleepDay.totalSleepMinutes),
             const SizedBox(height: 6),
             _SleepStageRow(
                 label: 'Light',
-                minutes: sessions.first.lightMinutes,
+                minutes: sleepDay.totalLightMinutes,
                 color: const Color(0xFF7E57C2),
-                total: sessions.first.totalMinutes),
+                total: sleepDay.totalSleepMinutes),
             const SizedBox(height: 6),
             _SleepStageRow(
                 label: 'REM',
-                minutes: sessions.first.remMinutes,
+                minutes: sleepDay.totalRemMinutes,
                 color: const Color(0xFFCE93D8),
-                total: sessions.first.totalMinutes),
+                total: sleepDay.totalSleepMinutes),
             const SizedBox(height: 10),
             // Bed/wake times
             Row(
@@ -891,11 +891,11 @@ class _SleepCard extends StatelessWidget {
                 _SleepTimeChip(
                     icon: Icons.airline_seat_flat,
                     label: 'Bedtime',
-                    time: sessions.first.bedtime),
+                    time: sleepDay.intervals.first.startTime),
                 _SleepTimeChip(
                     icon: Icons.wb_sunny_outlined,
                     label: 'Wake up',
-                    time: sessions.first.wakeTime),
+                    time: sleepDay.intervals.last.endTime),
               ],
             ),
           ],
