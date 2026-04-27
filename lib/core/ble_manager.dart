@@ -81,12 +81,8 @@ class BLEManager extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   Future<void> _loadPersistedData() async {
-    final saved = await _storage.loadMetrics();
-    if (saved != null) {
-      _metrics = saved;
-      _logger.i("Loaded persisted metrics: ${saved.steps} steps");
-    }
-    _lastSyncTime = await _storage.loadLastSyncTime();
+    await activityStore.load();
+    _lastSyncTime = activityStore.lastActivitySync;
     notifyListeners();
   }
 
@@ -588,21 +584,35 @@ class BLEManager extends ChangeNotifier {
 
       // Fetch last 24h of activity data (or since last sync)
       final since = DateTime.now().subtract(const Duration(days: 1));
-      _logger.i('Activity fetch: requesting since $since');
-
-      final samples = await _activityFetcher!.fetchActivityData(since);
-      if (samples.isNotEmpty) {
-        activityStore.addSamples(samples);
-        _logger.i('Activity fetch: got ${samples.length} samples');
+      
+      _logger.i('Fetching Heart Rate History since $since');
+      final hrReadings = await _activityFetcher!.fetchHeartRateHistory(since);
+      if (hrReadings.isNotEmpty) {
+        activityStore.addHeartRateReadings(hrReadings);
+        activityStore.updateHrSync(DateTime.now());
+        _logger.i('HR fetch: got ${hrReadings.length} readings');
       } else {
-        _logger.i('Activity fetch: no new samples');
+        _logger.i('HR fetch: no new data');
       }
 
-      // Try SPO2 fetch
+      _logger.i('Fetching SPO2 History since $since');
       final spo2 = await _activityFetcher!.fetchSpo2(since);
       if (spo2.isNotEmpty) {
         activityStore.addSpo2Readings(spo2);
+        activityStore.updateSpo2Sync(DateTime.now());
         _logger.i('SPO2 fetch: got ${spo2.length} readings');
+      } else {
+        _logger.i('SPO2 fetch: no new data');
+      }
+
+      _logger.i('Fetching Activity/Sleep Data since $since');
+      final samples = await _activityFetcher!.fetchActivityData(since);
+      if (samples.isNotEmpty) {
+        activityStore.addSamples(samples);
+        activityStore.updateActivitySync(DateTime.now());
+        _logger.i('Activity fetch: got ${samples.length} samples');
+      } else {
+        _logger.i('Activity fetch: no new samples');
       }
 
       // Persist

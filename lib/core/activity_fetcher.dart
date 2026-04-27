@@ -17,7 +17,7 @@ class ActivityFetcher {
   final List<int> _dataBuffer = [];
   DateTime? _fetchStartTime;
   int _expectedSampleSize = 8;
-  Completer<List<ActivitySample>>? _fetchCompleter;
+  Completer<List<int>>? _fetchCompleter;
   Timer? _fetchTimeout;
 
   ActivityFetcher(this._logger, this._device);
@@ -75,22 +75,19 @@ class ActivityFetcher {
     }
   }
 
-  Future<List<ActivitySample>> fetchActivityData(DateTime since) async {
+  Future<List<int>> fetchRawData(int type, DateTime since) async {
     if (_activityControl == null) return [];
 
     _dataBuffer.clear();
     _fetchStartTime = since;
-    _fetchCompleter = Completer<List<ActivitySample>>();
+    _fetchCompleter = Completer<List<int>>();
 
-    // Note: Huami characters 0x0004/0x0005 usually ONLY support WRITE_WITHOUT_RESPONSE
-    const writeMode = true;
-
-    _logger.i('ActivityFetcher: requesting data since $since');
-    final cmd = _buildFetchCommand(0x01, since);
+    _logger.i('ActivityFetcher: requesting data type 0x${type.toRadixString(16)} since $since');
+    final cmd = _buildFetchCommand(type, since);
     _logger.d('ActivityFetcher: cmd = ${_hexStr(cmd)}');
 
     try {
-      await _activityControl!.write(cmd, withoutResponse: writeMode);
+      await _activityControl!.write(cmd, withoutResponse: true);
       _logger.i('ActivityFetcher: fetch command sent');
     } catch (e) {
       _logger.e('ActivityFetcher: fetch command failed: $e');
@@ -99,8 +96,7 @@ class ActivityFetcher {
 
     _fetchTimeout = Timer(const Duration(seconds: 60), () {
       if (!_fetchCompleter!.isCompleted) {
-        _logger
-            .e('ActivityFetcher: fetch timed out (60s) waiting for response');
+        _logger.e('ActivityFetcher: fetch timed out (60s) waiting for response');
         _sendAck();
         _fetchCompleter!.complete([]);
       }
@@ -109,45 +105,32 @@ class ActivityFetcher {
     return _fetchCompleter!.future;
   }
 
+  Future<List<ActivitySample>> fetchActivityData(DateTime since) async {
+    await fetchRawData(0x01, since);
+    return _parseActivityData();
+  }
+
   Future<List<Spo2Reading>> fetchSpo2(DateTime since) async {
-    if (_activityControl == null) return [];
-    _dataBuffer.clear();
-    _fetchStartTime = since;
-    _fetchCompleter = Completer<List<ActivitySample>>();
-
-    final cmd = _buildFetchCommand(0x25, since);
-    try {
-      await _activityControl!.write(cmd, withoutResponse: true);
-    } catch (e) {
-      _logger.e('ActivityFetcher: SPO2 fetch command failed: $e');
-      return [];
-    }
-
-    try {
-      await _fetchCompleter!.future.timeout(const Duration(seconds: 30));
-    } catch (_) {
-      _logger.e('ActivityFetcher: SPO2 fetch timed out');
-      await _sendAck();
-    }
-
+    await fetchRawData(0x12, since);
     return _parseSpo2Data();
   }
 
-  List<int> _buildFetchCommand(int type, DateTime since) {
-    final year = since.year;
-    final tzQuarters = since.timeZoneOffset.inMinutes ~/ 15;
+  Future<List<HeartRateReading>> fetchHeartRateHistory(DateTime since) async {
+    await fetchRawData(0x02, since);
+    return _parseHeartRateData();
+  }
 
+  List<int> _buildFetchCommand(int type, DateTime since) {
+    final tsSec = since.millisecondsSinceEpoch ~/ 1000;
     return [
-      0x01, // COMMAND_ACTIVITY_DATA_START_DATE
-      type, // 0x01 for activity, 0x25 for SPO2
-      year & 0xFF,
-      (year >> 8) & 0xFF,
-      since.month,
-      since.day,
-      since.hour,
-      since.minute,
-      0x00, // padding/reason
-      tzQuarters & 0xFF, // Timezone quarters
+      0x01,
+      type,
+      tsSec & 0xFF,
+      (tsSec >> 8) & 0xFF,
+      (tsSec >> 16) & 0xFF,
+      (tsSec >> 24) & 0xFF,
+      0x00,
+      0x08,
     ];
   }
 
@@ -183,15 +166,15 @@ class ActivityFetcher {
           await _sendAck();
           if (!_fetchCompleter!.isCompleted) _fetchCompleter!.complete([]);
         }
-      } else if (data[1] == 0x02) {
-        // Step 2 response: Transfer finished
+      } else if (data[1] == 0x02 || data[1] == 0x0B) {
+        // Step 2 response: Transfer finished or Chunks done (0x0B)
         if (data[2] == 0x01) {
-          _logger.i('ActivityFetcher: band says fetch complete');
+          _logger.i('ActivityFetcher: band says fetch complete (0x${data[1].toRadixString(16)})');
           await _sendAck();
           _completeFetch();
         } else {
           _logger.e(
-              'ActivityFetcher: fetch ended with error 0x${data[2].toRadixString(16)})');
+              'ActivityFetcher: fetch ended with error 0x${data[2].toRadixString(16)}');
           _completeFetch();
         }
       }
@@ -246,21 +229,26 @@ class ActivityFetcher {
     _dataBuffer.addAll(payload);
     _logger
         .d('ActivityFetcher DATA: ${data.length} bytes (counter: ${data[0]})');
+
+    // ACK packet and request next chunk
+    if (_activityControl != null) {
+      _activityControl!.write([0x02], withoutResponse: true).catchError((e) {
+        _logger.e('ActivityFetcher: failed to send chunk ACK: $e');
+      });
+    }
   }
 
   void _completeFetch() {
     _fetchTimeout?.cancel();
-    final samples = _parseActivityData();
-    _logger.i('ActivityFetcher: parsed ${samples.length} activity samples');
+    _logger.i('ActivityFetcher: fetch complete, buffer size: ${_dataBuffer.length}');
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
-      _fetchCompleter!.complete(samples);
+      _fetchCompleter!.complete(List.from(_dataBuffer));
     }
   }
 
   List<ActivitySample> _parseActivityData() {
     if (_dataBuffer.isEmpty || _fetchStartTime == null) return [];
-    final sampleSize = _expectedSampleSize;
-    if (sampleSize == 0) return [];
+    const sampleSize = 4;
     final sampleCount = _dataBuffer.length ~/ sampleSize;
     final samples = <ActivitySample>[];
 
@@ -268,38 +256,60 @@ class ActivityFetcher {
       final offset = i * sampleSize;
       if (offset + sampleSize > _dataBuffer.length) break;
       final ts = _fetchStartTime!.add(Duration(minutes: i));
+      
+      final category = _dataBuffer[offset];
+      final intensity = _dataBuffer[offset + 1];
+      final steps = _dataBuffer[offset + 2] | (_dataBuffer[offset + 3] << 8);
+
       samples.add(ActivitySample(
         timestamp: ts,
-        category: _dataBuffer[offset],
-        intensity: _dataBuffer[offset + 1],
-        steps: _dataBuffer[offset + 2],
-        heartRate: _dataBuffer[offset + 3],
-        sleep: sampleSize >= 8 ? _dataBuffer[offset + 5] : null,
-        deepSleep: sampleSize >= 8 ? _dataBuffer[offset + 6] : null,
-        remSleep: sampleSize >= 8 ? _dataBuffer[offset + 7] : null,
+        category: category,
+        intensity: intensity,
+        steps: steps,
+        heartRate: 0, // HR is fetched separately in this mode
       ));
     }
     return samples;
   }
 
+  List<HeartRateReading> _parseHeartRateData() {
+    if (_dataBuffer.isEmpty || _fetchStartTime == null) return [];
+    const sampleSize = 2;
+    final sampleCount = _dataBuffer.length ~/ sampleSize;
+    final readings = <HeartRateReading>[];
+
+    for (var i = 0; i < sampleCount; i++) {
+      final offset = i * sampleSize;
+      if (offset + sampleSize > _dataBuffer.length) break;
+      
+      final hrValue = _dataBuffer[offset];
+      if (hrValue > 0) {
+        final ts = _fetchStartTime!.add(Duration(minutes: i));
+        readings.add(HeartRateReading(
+          timestamp: ts,
+          value: hrValue,
+        ));
+      }
+    }
+    return readings;
+  }
+
   List<Spo2Reading> _parseSpo2Data() {
-    if (_dataBuffer.isEmpty) return [];
+    if (_dataBuffer.isEmpty || _fetchStartTime == null) return [];
+    const sampleSize = 2;
+    final sampleCount = _dataBuffer.length ~/ sampleSize;
     final readings = <Spo2Reading>[];
-    const recordSize = 65;
-    int startIdx = (_dataBuffer[0] == 2) ? 1 : 0;
-    for (var i = startIdx;
-        i + recordSize <= _dataBuffer.length;
-        i += recordSize) {
-      final tsSec = _dataBuffer[i] |
-          (_dataBuffer[i + 1] << 8) |
-          (_dataBuffer[i + 2] << 16) |
-          (_dataBuffer[i + 3] << 24);
-      int valRaw = _dataBuffer[i + 4];
-      int spo2 = valRaw > 127 ? valRaw - 128 : valRaw;
-      if (spo2 > 0 && spo2 <= 100) {
+
+    for (var i = 0; i < sampleCount; i++) {
+      final offset = i * sampleSize;
+      if (offset + sampleSize > _dataBuffer.length) break;
+      
+      final spo2Value = _dataBuffer[offset];
+      if (spo2Value > 0 && spo2Value <= 100) {
+        final ts = _fetchStartTime!.add(Duration(minutes: i));
         readings.add(Spo2Reading(
-          timestamp: DateTime.fromMillisecondsSinceEpoch(tsSec * 1000),
-          value: spo2,
+          timestamp: ts,
+          value: spo2Value,
         ));
       }
     }

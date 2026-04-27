@@ -10,15 +10,26 @@ import '../core/activity_sample.dart';
 class ActivityStore {
   static const _activityFile = 'activity_data.json';
   static const _spo2File = 'spo2_data.json';
-  static const _lastSyncFile = 'last_activity_sync.txt';
+  static const _hrFile = 'hr_data.json';
+  static const _lastActivitySyncFile = 'last_activity_sync.txt';
+  static const _lastSpo2SyncFile = 'last_spo2_sync.txt';
+  static const _lastHrSyncFile = 'last_hr_sync.txt';
 
   List<ActivitySample> _samples = [];
   List<Spo2Reading> _spo2Readings = [];
-  DateTime? _lastSyncTimestamp;
+  List<HeartRateReading> _hrReadings = [];
+  DateTime? _lastActivitySync;
+  DateTime? _lastSpo2Sync;
+  DateTime? _lastHrSync;
 
   List<ActivitySample> get samples => _samples;
   List<Spo2Reading> get spo2Readings => _spo2Readings;
-  DateTime? get lastSyncTimestamp => _lastSyncTimestamp;
+  List<HeartRateReading> get hrReadings => _hrReadings;
+  DateTime? get lastActivitySync => _lastActivitySync;
+  DateTime? get lastSpo2Sync => _lastSpo2Sync;
+  DateTime? get lastHrSync => _lastHrSync;
+  @Deprecated('Use lastActivitySync')
+  DateTime? get lastSyncTimestamp => _lastActivitySync;
 
   // ── File paths ──────────────────────────────────────────────────────────
 
@@ -51,12 +62,36 @@ class ActivityStore {
     } catch (_) {}
 
     try {
-      final f = await _getFile(_lastSyncFile);
+      final f = await _getFile(_hrFile);
+      if (await f.exists()) {
+        final json = jsonDecode(await f.readAsString()) as List;
+        _hrReadings = json
+            .map((e) => HeartRateReading.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+    } catch (_) {}
+
+    try {
+      final f = await _getFile(_lastActivitySyncFile);
       if (await f.exists()) {
         final ms = int.tryParse(await f.readAsString());
-        if (ms != null) {
-          _lastSyncTimestamp = DateTime.fromMillisecondsSinceEpoch(ms);
-        }
+        if (ms != null) _lastActivitySync = DateTime.fromMillisecondsSinceEpoch(ms);
+      }
+    } catch (_) {}
+
+    try {
+      final f = await _getFile(_lastSpo2SyncFile);
+      if (await f.exists()) {
+        final ms = int.tryParse(await f.readAsString());
+        if (ms != null) _lastSpo2Sync = DateTime.fromMillisecondsSinceEpoch(ms);
+      }
+    } catch (_) {}
+
+    try {
+      final f = await _getFile(_lastHrSyncFile);
+      if (await f.exists()) {
+        final ms = int.tryParse(await f.readAsString());
+        if (ms != null) _lastHrSync = DateTime.fromMillisecondsSinceEpoch(ms);
       }
     } catch (_) {}
   }
@@ -70,10 +105,21 @@ class ActivityStore {
     await f2.writeAsString(
         jsonEncode(_spo2Readings.map((s) => s.toJson()).toList()));
 
-    if (_lastSyncTimestamp != null) {
-      final f3 = await _getFile(_lastSyncFile);
-      await f3
-          .writeAsString(_lastSyncTimestamp!.millisecondsSinceEpoch.toString());
+    final f_hr = await _getFile(_hrFile);
+    await f_hr.writeAsString(
+        jsonEncode(_hrReadings.map((s) => s.toJson()).toList()));
+
+    if (_lastActivitySync != null) {
+      final f = await _getFile(_lastActivitySyncFile);
+      await f.writeAsString(_lastActivitySync!.millisecondsSinceEpoch.toString());
+    }
+    if (_lastSpo2Sync != null) {
+      final f = await _getFile(_lastSpo2SyncFile);
+      await f.writeAsString(_lastSpo2Sync!.millisecondsSinceEpoch.toString());
+    }
+    if (_lastHrSync != null) {
+      final f = await _getFile(_lastHrSyncFile);
+      await f.writeAsString(_lastHrSync!.millisecondsSinceEpoch.toString());
     }
   }
 
@@ -91,8 +137,20 @@ class ActivityStore {
     _samples.sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
     if (newSamples.isNotEmpty) {
-      _lastSyncTimestamp = DateTime.now();
+      _lastActivitySync = DateTime.now();
     }
+  }
+
+  void updateActivitySync(DateTime ts) {
+    _lastActivitySync = ts;
+  }
+
+  void updateSpo2Sync(DateTime ts) {
+    _lastSpo2Sync = ts;
+  }
+
+  void updateHrSync(DateTime ts) {
+    _lastHrSync = ts;
   }
 
   void addSpo2Readings(List<Spo2Reading> readings) {
@@ -104,6 +162,17 @@ class ActivityStore {
       }
     }
     _spo2Readings.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  }
+
+  void addHeartRateReadings(List<HeartRateReading> readings) {
+    final existing =
+        _hrReadings.map((r) => r.timestamp.millisecondsSinceEpoch).toSet();
+    for (final r in readings) {
+      if (!existing.contains(r.timestamp.millisecondsSinceEpoch)) {
+        _hrReadings.add(r);
+      }
+    }
+    _hrReadings.sort((a, b) => a.timestamp.compareTo(b.timestamp));
   }
 
   // ── Queries ─────────────────────────────────────────────────────────────
@@ -134,75 +203,126 @@ class ActivityStore {
     return samplesForDate(date).fold(0, (sum, s) => sum + s.steps);
   }
 
-  /// Detect sleep sessions from activity samples.
-  ///
-  /// Looks for contiguous blocks of sleep-category samples.
-  /// A sleep session must be at least 30 minutes.
-  List<SleepSession> getSleepSessions(DateTime date) {
-    // Include previous evening (from 8pm previous day to noon today)
-    final windowStart = DateTime(date.year, date.month, date.day - 1, 20);
-    final windowEnd = DateTime(date.year, date.month, date.day, 12);
+  List<SleepInterval> _extractSleepIntervals(List<ActivitySample> samples) {
+    final intervals = <SleepInterval>[];
+    if (samples.isEmpty) return intervals;
 
-    final sleepSamples = _samples
-        .where((s) =>
-            s.timestamp.isAfter(windowStart) &&
-            s.timestamp.isBefore(windowEnd) &&
-            s.isSleep)
-        .toList();
+    SleepStage? currentStage;
+    DateTime? intervalStart;
+    int duration = 0;
 
-    if (sleepSamples.isEmpty) return [];
+    for (var i = 0; i < samples.length; i++) {
+      final s = samples[i];
+      final stage = s.sleepStage;
 
-    // Group into contiguous blocks (gap > 30 min = new session)
-    final sessions = <SleepSession>[];
-    var sessionStart = 0;
-
-    for (var i = 1; i <= sleepSamples.length; i++) {
-      final isEnd = i == sleepSamples.length ||
-          sleepSamples[i]
-                  .timestamp
-                  .difference(sleepSamples[i - 1].timestamp)
-                  .inMinutes >
-              30;
-
-      if (isEnd) {
-        final block = sleepSamples.sublist(sessionStart, i);
-        if (block.length >= 30) {
-          // Count stages
-          int light = 0, deep = 0, rem = 0, awake = 0;
-          for (final s in block) {
-            switch (s.sleepStage) {
-              case SleepStage.light:
-                light++;
-                break;
-              case SleepStage.deep:
-                deep++;
-                break;
-              case SleepStage.rem:
-                rem++;
-                break;
-              case SleepStage.awake:
-                awake++;
-                break;
-              case null:
-                break;
-            }
+      if (stage != null) {
+        if (currentStage == stage) {
+          duration++;
+        } else {
+          if (currentStage != null && intervalStart != null) {
+            intervals.add(SleepInterval(
+              startTime: intervalStart,
+              endTime: intervalStart.add(Duration(minutes: duration)),
+              stage: currentStage,
+              durationMinutes: duration,
+            ));
           }
-
-          sessions.add(SleepSession(
-            bedtime: block.first.timestamp,
-            wakeTime: block.last.timestamp.add(const Duration(minutes: 1)),
-            lightMinutes: light,
-            deepMinutes: deep,
-            remMinutes: rem,
-            awakeMinutes: awake,
-            samples: block,
+          currentStage = stage;
+          intervalStart = s.timestamp;
+          duration = 1;
+        }
+      } else {
+        if (currentStage != null && intervalStart != null) {
+          intervals.add(SleepInterval(
+            startTime: intervalStart,
+            endTime: intervalStart.add(Duration(minutes: duration)),
+            stage: currentStage,
+            durationMinutes: duration,
           ));
         }
-        sessionStart = i;
+        currentStage = null;
+        intervalStart = null;
+        duration = 0;
       }
     }
 
-    return sessions;
+    if (currentStage != null && intervalStart != null) {
+      intervals.add(SleepInterval(
+        startTime: intervalStart,
+        endTime: intervalStart.add(Duration(minutes: duration)),
+        stage: currentStage,
+        durationMinutes: duration,
+      ));
+    }
+
+    return intervals;
+  }
+
+  List<SleepDay> computeSleepDays() {
+    final intervals = _extractSleepIntervals(_samples);
+    if (intervals.isEmpty) return [];
+
+    final days = <SleepDay>[];
+    var currentGroup = <SleepInterval>[intervals.first];
+
+    for (var i = 1; i < intervals.length; i++) {
+      final current = intervals[i];
+      final previous = currentGroup.last;
+
+      final gap = current.startTime.difference(previous.endTime).inMinutes;
+      if (gap <= 240) { // 4 hours overlap/gap
+        currentGroup.add(current);
+      } else {
+        days.add(_buildSleepDay(currentGroup));
+        currentGroup = [current];
+      }
+    }
+
+    if (currentGroup.isNotEmpty) {
+      days.add(_buildSleepDay(currentGroup));
+    }
+
+    return days;
+  }
+
+  SleepDay _buildSleepDay(List<SleepInterval> group) {
+    int light = 0, deep = 0, rem = 0, awake = 0, nap = 0;
+    for (final interval in group) {
+      switch (interval.stage) {
+        case SleepStage.light: light += interval.durationMinutes; break;
+        case SleepStage.deep: deep += interval.durationMinutes; break;
+        case SleepStage.rem: rem += interval.durationMinutes; break;
+        case SleepStage.awake: awake += interval.durationMinutes; break;
+        case SleepStage.nap: nap += interval.durationMinutes; break;
+      }
+    }
+
+    // Use the date of the last interval's end to represent the sleep day
+    final lastTime = group.last.endTime;
+    final date = DateTime(lastTime.year, lastTime.month, lastTime.day);
+
+    return SleepDay(
+      date: date,
+      intervals: group,
+      totalLightMinutes: light,
+      totalDeepMinutes: deep,
+      totalRemMinutes: rem,
+      totalAwakeMinutes: awake,
+      totalNapMinutes: nap,
+    );
+  }
+
+  /// Get the computed sleep day record for a specific date.
+  SleepDay? getSleepForDate(DateTime date) {
+    final days = computeSleepDays();
+    try {
+      return days.firstWhere((d) => 
+        d.date.year == date.year && 
+        d.date.month == date.month && 
+        d.date.day == date.day);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Get SPO2 readings for a specific date.

@@ -75,17 +75,15 @@ enum SleepStage {
   light,
   deep,
   rem,
-  awake;
+  awake,
+  nap;
 
   static SleepStage? fromCategory(int cat) {
-    // Huami category values from Gadgetbridge:
-    //  112     = light sleep
-    //  121,122 = deep sleep
-    //  123     = REM sleep
-    //  Others in 1xx range with specific bits = awake-in-bed
     if (cat == 112) return SleepStage.light;
-    if (cat == 121 || cat == 122) return SleepStage.deep;
-    if (cat == 123) return SleepStage.rem;
+    if (cat == 121) return SleepStage.deep;
+    if (cat == 122) return SleepStage.rem;
+    if (cat == 126) return SleepStage.awake;
+    if (cat == 128) return SleepStage.nap;
     return null;
   }
 
@@ -99,35 +97,51 @@ enum SleepStage {
         return 'REM';
       case SleepStage.awake:
         return 'Awake';
+      case SleepStage.nap:
+        return 'Nap';
     }
   }
 }
 
-/// Summary of a sleep session (one contiguous block).
-class SleepSession {
-  final DateTime bedtime;
-  final DateTime wakeTime;
-  final int lightMinutes;
-  final int deepMinutes;
-  final int remMinutes;
-  final int awakeMinutes;
-  final List<ActivitySample> samples;
+class SleepInterval {
+  final DateTime startTime;
+  final DateTime endTime;
+  final SleepStage stage;
+  final int durationMinutes;
 
-  const SleepSession({
-    required this.bedtime,
-    required this.wakeTime,
-    required this.lightMinutes,
-    required this.deepMinutes,
-    required this.remMinutes,
-    required this.awakeMinutes,
-    required this.samples,
+  SleepInterval({
+    required this.startTime,
+    required this.endTime,
+    required this.stage,
+    required this.durationMinutes,
+  });
+}
+
+class SleepDay {
+  final DateTime date;
+  final List<SleepInterval> intervals;
+  final int totalLightMinutes;
+  final int totalDeepMinutes;
+  final int totalRemMinutes;
+  final int totalAwakeMinutes;
+  final int totalNapMinutes;
+
+  SleepDay({
+    required this.date,
+    required this.intervals,
+    required this.totalLightMinutes,
+    required this.totalDeepMinutes,
+    required this.totalRemMinutes,
+    required this.totalAwakeMinutes,
+    required this.totalNapMinutes,
   });
 
-  int get totalMinutes => wakeTime.difference(bedtime).inMinutes;
+  int get totalSleepMinutes =>
+      totalLightMinutes + totalDeepMinutes + totalRemMinutes + totalNapMinutes;
 
   String get durationString {
-    final h = totalMinutes ~/ 60;
-    final m = totalMinutes % 60;
+    final h = totalSleepMinutes ~/ 60;
+    final m = totalSleepMinutes % 60;
     return '${h}h ${m}m';
   }
 }
@@ -161,4 +175,22 @@ class HourlySteps {
     required this.steps,
     this.calories = 0,
   });
+}
+
+/// Heart Rate reading history.
+class HeartRateReading {
+  final DateTime timestamp;
+  final int value;
+
+  const HeartRateReading({required this.timestamp, required this.value});
+
+  Map<String, dynamic> toJson() => {
+        't': timestamp.millisecondsSinceEpoch,
+        'v': value,
+      };
+
+  factory HeartRateReading.fromJson(Map<String, dynamic> j) => HeartRateReading(
+        timestamp: DateTime.fromMillisecondsSinceEpoch(j['t'] as int),
+        value: j['v'] as int,
+      );
 }
