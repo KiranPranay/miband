@@ -16,13 +16,22 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | `hardware-test-session.md` | **Runnable** gated session guide (gates 0→6) for the physical band. |
 | `test-results-NN.md` | Per-run results template (fill after each hardware run; never overwrite). |
 
-## Headline result (findings-01)
-- **Mi Band 6 = legacy Huami protocol**, *not* the 2021 chunked channel.
-- The task's "HR runs over chunked `0x0016/0x0017`" hypothesis is **REFUTED** for
-  MB6 (Gadgetbridge evidence). Session-key derivation is **not needed**.
-- Real HR path = standard `0x180D` service: write `15 01 01` to `0x2A39`, read
-  `0x2A37` notifications.
-- Our auth is already correct (legacy AES-ECB) and must stay unchanged.
+## Headline result — CORRECTED on hardware (findings-06)
+- **This Mi Band 6 firmware requires the Huami SIGN-KEY (ECDH / 2021-class) auth.**
+  On-device proof: the canonical legacy AES-ECB handshake now runs perfectly
+  through all 3 steps but the band's final status is `0x07` = **"sign key failed"**
+  (Notify `R.string.pairing_signkey_failed`; `0x08` would be auth-key-failed, so the
+  auth key is fine). This **overturns** findings-01..05's assumption that MB6 uses
+  pure legacy auth.
+- Consequences confirmed on hardware: the standard `0x180D` HR service
+  (`0x2A37`/`0x2A39`) returns `GATT_WRITE_NOT_PERMITTED (code=3)` and the activity
+  fetch gets no response — both gated behind full (sign-key) auth. Battery/steps
+  work because they read with partial auth.
+- Earlier eliminations (all captured): post-auth sequencing, the `06 1f 00 01`
+  third-party flag, and Android bonding (`createBond` succeeds, HR still locked).
+- **Real unlock = implement the sign-key/ECDH auth** (port `ECDH_B163` +
+  `InitOperation2021` + chunked `0x0016/0x0017` transport from Gadgetbridge).
+  Surfaced to the user as a scope decision.
 
 ## Status checklist
 | Item | Status |
