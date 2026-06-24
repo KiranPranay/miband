@@ -16,7 +16,9 @@ class ActivityFetcher {
 
   final List<int> _dataBuffer = [];
   DateTime? _fetchStartTime;
-  int _expectedSampleSize = 8;
+  // Mi Band 6 stores one 8-byte activity sample per minute (fixed device
+  // property — see protocol-mb6.md §5). Older bands use 4 bytes.
+  static const int _sampleSize = 8;
   Completer<List<int>>? _fetchCompleter;
   Timer? _fetchTimeout;
 
@@ -111,14 +113,18 @@ class ActivityFetcher {
   }
 
   Future<List<Spo2Reading>> fetchSpo2(DateTime since) async {
-    await fetchRawData(0x12, since);
+    // SpO2 fetch type = 0x25 (37). NOTE: 0x12 is STRESS and 0x0D is SLEEP —
+    // both were wrong in the earlier code (see findings-02.md §3). The SpO2
+    // sample layout is still UNVERIFIED; this is a best-effort parse.
+    await fetchRawData(0x25, since);
     return _parseSpo2Data();
   }
 
+  /// HR history is embedded in the activity stream (byte 3 of each 8-byte
+  /// sample), so we fetch activity data and extract HR from it.
   Future<List<HeartRateReading>> fetchHeartRateHistory(DateTime since) async {
-    // HR history type = 0x0D (13) as seen in decompiled Notify source
-    await fetchRawData(0x0D, since);
-    return _parseHeartRateData();
+    final samples = await fetchActivityData(since);
+    return heartRatesFromSamples(samples);
   }
 
   List<int> _buildFetchCommand(int type, DateTime since) {
@@ -166,9 +172,9 @@ class ActivityFetcher {
               return;
             }
 
-            _expectedSampleSize = data.length >= 8 ? data[7] : 8;
-            _logger.d(
-                'ActivityFetcher: sample size from band = $_expectedSampleSize');
+            // NOTE: bytes[7..14] are the echoed start timestamp, NOT a sample
+            // size. The sample size is a fixed device property (8 for Mi Band 6
+            // — see protocol-mb6.md §5 / findings-02.md §3), not transmitted.
           }
           await _sendFetchDataCommand();
         } else {
@@ -253,52 +259,54 @@ class ActivityFetcher {
     }
   }
 
-  List<ActivitySample> _parseActivityData() {
-    if (_dataBuffer.isEmpty || _fetchStartTime == null) return [];
-    const sampleSize = 4;
-    final sampleCount = _dataBuffer.length ~/ sampleSize;
+  List<ActivitySample> _parseActivityData() =>
+      parseActivitySamples(_dataBuffer, _fetchStartTime);
+
+  /// Parse the Mi Band 6 8-byte activity samples (one per minute):
+  ///   [0] category/kind  [1] intensity  [2] steps (single byte 0-255)
+  ///   [3] heart rate     [4] unknown1   [5] sleep  [6] deepSleep  [7] remSleep
+  /// (Byte-for-byte identical to Gadgetbridge createExtendedSample() and Notify
+  ///  helper b.s(); see protocol-mb6.md §5 / findings-02.md §3.)
+  ///
+  /// Static + pure so it can be unit-tested without a BLE connection.
+  static List<ActivitySample> parseActivitySamples(
+    List<int> data,
+    DateTime? startTime, {
+    int sampleSize = _sampleSize,
+  }) {
+    if (data.isEmpty || startTime == null) return [];
+    final sampleCount = data.length ~/ sampleSize;
     final samples = <ActivitySample>[];
 
     for (var i = 0; i < sampleCount; i++) {
       final offset = i * sampleSize;
-      if (offset + sampleSize > _dataBuffer.length) break;
-      final ts = _fetchStartTime!.add(Duration(minutes: i));
-      
-      final category = _dataBuffer[offset];
-      final intensity = _dataBuffer[offset + 1];
-      final steps = _dataBuffer[offset + 2] | (_dataBuffer[offset + 3] << 8);
+      if (offset + sampleSize > data.length) break;
+      final ts = startTime.add(Duration(minutes: i));
 
+      final hr = data[offset + 3];
       samples.add(ActivitySample(
         timestamp: ts,
-        category: category,
-        intensity: intensity,
-        steps: steps,
-        heartRate: 0, // HR is fetched separately in this mode
+        category: data[offset],
+        intensity: data[offset + 1],
+        steps: data[offset + 2], // per-minute step count (0-255)
+        // Treat 0/255 as "no reading" (cleanHeartValue in the reference apps).
+        heartRate: (hr >= 7 && hr <= 249) ? hr : 0,
+        sleep: data[offset + 5],
+        deepSleep: data[offset + 6],
+        remSleep: data[offset + 7],
       ));
     }
     return samples;
   }
 
-  List<HeartRateReading> _parseHeartRateData() {
-    if (_dataBuffer.isEmpty || _fetchStartTime == null) return [];
-    const sampleSize = 2;
-    final sampleCount = _dataBuffer.length ~/ sampleSize;
-    final readings = <HeartRateReading>[];
-
-    for (var i = 0; i < sampleCount; i++) {
-      final offset = i * sampleSize;
-      if (offset + sampleSize > _dataBuffer.length) break;
-      
-      final hrValue = _dataBuffer[offset];
-      if (hrValue > 0) {
-        final ts = _fetchStartTime!.add(Duration(minutes: i));
-        readings.add(HeartRateReading(
-          timestamp: ts,
-          value: hrValue,
-        ));
-      }
-    }
-    return readings;
+  /// Heart-rate history is embedded in the per-minute activity samples (byte 3),
+  /// so we derive it from the activity fetch rather than a separate request.
+  static List<HeartRateReading> heartRatesFromSamples(
+      List<ActivitySample> samples) {
+    return samples
+        .where((s) => s.heartRate >= 7 && s.heartRate <= 249)
+        .map((s) => HeartRateReading(timestamp: s.timestamp, value: s.heartRate))
+        .toList();
   }
 
   List<Spo2Reading> _parseSpo2Data() {

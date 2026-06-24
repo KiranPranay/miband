@@ -8,6 +8,7 @@ import 'encryption.dart';
 import '../storage/secure_storage.dart';
 import 'dart:typed_data';
 import 'band_metrics.dart';
+import 'activity_sample.dart';
 import 'activity_fetcher.dart';
 import '../storage/activity_store.dart';
 import 'alert_manager.dart';
@@ -40,11 +41,19 @@ class BLEManager extends ChangeNotifier {
   BluetoothCharacteristic? _stepsChar;
   BluetoothCharacteristic? _alertChar;
 
+  // Heart rate (standard GATT 0x180D service — see protocol-mb6.md §3)
+  BluetoothCharacteristic? _hrMeasureChar; // 0x2A37 (notify)
+  BluetoothCharacteristic? _hrControlChar; // 0x2A39 (write)
+  BluetoothCharacteristic? _battChar; // fee0/0x0006 (Huami battery)
+
   StreamSubscription<BluetoothConnectionState>? _connSubscription;
   StreamSubscription<List<int>>? _charSubscription;
   StreamSubscription<List<int>>? _stepsSubscription;
+  StreamSubscription<List<int>>? _hrSubscription;
   Timer? _authTimeoutTimer;
   Timer? _reconnectTimer;
+  Timer? _hrKeepAliveTimer;
+  bool _realtimeHrActive = false;
 
   bool _isReconnecting = false;
   bool _userDisconnected = false;
@@ -193,8 +202,14 @@ class BLEManager extends ChangeNotifier {
     _authPhase = _AuthPhase.idle;
     _authChar = null;
     _stepsChar = null;
+    _hrMeasureChar = null;
+    _hrControlChar = null;
+    _battChar = null;
     _charSubscription?.cancel();
     _stepsSubscription?.cancel();
+    _hrSubscription?.cancel();
+    _hrKeepAliveTimer?.cancel();
+    _realtimeHrActive = false;
     // NOTE: _metrics is intentionally NOT reset — we keep the last known values
     // so the UI can still display historical data while disconnected.
     _batteryLevel = null;
@@ -483,7 +498,9 @@ class BLEManager extends ChangeNotifier {
     // Step 3: Subscriptions
     await _subscribeToSteps();
     await _readBattery();
-    await _subscribeToHeartRate();
+    // Realtime HR over the standard 0x180D service (0x2A37/0x2A39) with the
+    // required ~14 s keep-alive ping. See protocol-mb6.md §3.
+    await startRealtimeHeartRate();
 
     await Future.delayed(const Duration(seconds: 2));
 
@@ -598,15 +615,24 @@ class BLEManager extends ChangeNotifier {
 
       // Fetch last 24h of activity data (or since last sync)
       final since = DateTime.now().subtract(const Duration(days: 1));
-      
-      _logger.i('Fetching Heart Rate History since $since');
-      final hrReadings = await _activityFetcher!.fetchHeartRateHistory(since);
-      if (hrReadings.isNotEmpty) {
-        activityStore.addHeartRateReadings(hrReadings);
-        activityStore.updateHrSync(DateTime.now());
-        _logger.i('HR fetch: got ${hrReadings.length} readings');
+
+      // One activity fetch yields steps, sleep AND heart-rate history — HR is
+      // embedded at byte 3 of each 8-byte sample (see protocol-mb6.md §5).
+      _logger.i('Fetching Activity/Sleep/HR Data since $since');
+      final samples = await _activityFetcher!.fetchActivityData(since);
+      if (samples.isNotEmpty) {
+        activityStore.addSamples(samples);
+        activityStore.updateActivitySync(DateTime.now());
+        _logger.i('Activity fetch: got ${samples.length} samples');
+
+        final hrReadings = ActivityFetcher.heartRatesFromSamples(samples);
+        if (hrReadings.isNotEmpty) {
+          activityStore.addHeartRateReadings(hrReadings);
+          activityStore.updateHrSync(DateTime.now());
+          _logger.i('HR history: derived ${hrReadings.length} readings from activity');
+        }
       } else {
-        _logger.i('HR fetch: no new data');
+        _logger.i('Activity fetch: no new samples');
       }
 
       _logger.i('Fetching SPO2 History since $since');
@@ -617,16 +643,6 @@ class BLEManager extends ChangeNotifier {
         _logger.i('SPO2 fetch: got ${spo2.length} readings');
       } else {
         _logger.i('SPO2 fetch: no new data');
-      }
-
-      _logger.i('Fetching Activity/Sleep Data since $since');
-      final samples = await _activityFetcher!.fetchActivityData(since);
-      if (samples.isNotEmpty) {
-        activityStore.addSamples(samples);
-        activityStore.updateActivitySync(DateTime.now());
-        _logger.i('Activity fetch: got ${samples.length} samples');
-      } else {
-        _logger.i('Activity fetch: no new samples');
       }
 
       // Persist
@@ -815,36 +831,159 @@ class BLEManager extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
-  // Heart rate — TODO: Mi Band 6 firmware blocks 0x2A37 CCCD writes
+  // Heart rate — standard GATT Heart-Rate service 0x180D
   //
-  // What we confirmed works:
-  //   ✓ Auth V3 handshake via fee1/FEC1
-  //   ✓ fee0/0x0008 accepts all HR commands (GATT_SUCCESS):
-  //     - [0x06, 0x1f, 0x00, 0x01]  Enable HR connection
-  //     - [0x14, 0x01]              Set periodic interval
-  //     - [0x15, 0x00, 0x01]        Enable HR sleep measurement
-  //   ✓ BLE bonding (createBond) succeeds
+  // RESOLVED (see docs/reverse-engineering/protocol-mb6.md §3, findings-02.md §2):
+  // Mi Band 6 is a LEGACY Huami device — realtime HR does NOT use the Huami-2021
+  // chunked channel (0x0016/0x0017). It uses the standard HR service:
+  //   • measurement / notify  →  0x2A37  (in service 0x180D)
+  //   • control point / write →  0x2A39
+  // Commands written to 0x2A39 (confirmed in Gadgetbridge HuamiSupport AND the
+  // decompiled Notify app x5/e.java):
+  //   - [0x15, 0x01, 0x01]  start continuous (realtime) HR
+  //   - [0x15, 0x01, 0x00]  stop continuous
+  //   - [0x15, 0x02, 0x01]  one-shot / manual measurement
+  //   - [0x15, 0x02, 0x00]  stop manual
+  //   - [0x16]              KEEP-ALIVE ping — Notify resends this to 0x2A39 every
+  //                         ~14 s while continuous HR is active, or the band stops
+  //                         streaming (BLEManager.l1 / x5.e L()).
+  // A 0x2A37 notification of [flags, bpm] yields bpm = data[1] & 0xFF (valid 7..249).
   //
-  // What's blocked:
-  //   ✗ 0x180D/0x2A37 setNotifyValue → GATT_WRITE_NOT_PERMITTED (3)
-  //     Even after: auth + bonding + HR commands + Zepp "discoverable" ON
-  //
-  // Possible next steps:
-  //   1. Study how Gadgetbridge reads HR — it may use the Huami 2021
-  //      chunked protocol (chars 0x0016/0x0017 which our band doesn't expose)
-  //      or parse HR from activity data fetches, not realtime 0x2A37.
-  //   2. Try a native Android BLE implementation (bypassing flutter_blue_plus)
-  //      to rule out library-level descriptor handling issues.
-  //   3. Check if Notify for Mi Band uses a different approach entirely.
+  // The earlier GATT_WRITE_NOT_PERMITTED on enabling 0x2A37 was a sequencing issue
+  // (Notify and Gadgetbridge both enable this CCCD fine on MB6 post-auth); we now
+  // enable notify only after auth success + a short settle.
   // ---------------------------------------------------------------------------
 
-  Future<void> _subscribeToHeartRate() async {
-    // TODO: HR monitoring not yet working — see notes above.
-    _logger.d("HR: skipped (0x2A37 CCCD blocked by firmware).");
+  static const _hrStartContinuous = [0x15, 0x01, 0x01];
+  static const _hrStopContinuous = [0x15, 0x01, 0x00];
+  static const _hrStartManual = [0x15, 0x02, 0x01];
+  static const _hrStopManual = [0x15, 0x02, 0x00];
+  static const _hrKeepAlivePing = [0x16];
+
+  bool get isRealtimeHeartRateActive => _realtimeHrActive;
+
+  /// Discover the standard 0x180D HR characteristics and subscribe to 0x2A37.
+  /// Safe to call multiple times.
+  Future<bool> _setupHeartRate() async {
+    if (_device == null || !_device!.isConnected) return false;
+    if (_hrMeasureChar != null && _hrControlChar != null) return true;
+
+    try {
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (!svc.uuid.str.toLowerCase().contains('180d')) continue;
+        for (final c in svc.characteristics) {
+          final cu = c.uuid.str.toLowerCase();
+          if (cu.contains('2a37')) _hrMeasureChar = c;
+          if (cu.contains('2a39')) _hrControlChar = c;
+        }
+      }
+
+      if (_hrMeasureChar == null || _hrControlChar == null) {
+        _logger.e('HR: 0x180D service or 0x2A37/0x2A39 chars not found '
+            '(measure=${_hrMeasureChar != null}, control=${_hrControlChar != null}).');
+        return false;
+      }
+
+      _logger.d('HR: 0x2A37 props notify=${_hrMeasureChar!.properties.notify}, '
+          'indicate=${_hrMeasureChar!.properties.indicate}; '
+          '0x2A39 props write=${_hrControlChar!.properties.write}, '
+          'writeNR=${_hrControlChar!.properties.writeWithoutResponse}');
+
+      try {
+        await _hrMeasureChar!.setNotifyValue(true);
+        _logger.i('HR: notifications enabled on 0x2A37.');
+      } catch (e) {
+        _logger.e('HR: failed to enable 0x2A37 notify ($e). '
+            'Realtime HR unavailable; HR history still comes from the activity fetch.');
+        return false;
+      }
+
+      _hrSubscription?.cancel();
+      _hrSubscription = _hrMeasureChar!.onValueReceived.listen(_onHeartRateNotified);
+      return true;
+    } catch (e) {
+      _logger.e('HR setup error: $e');
+      return false;
+    }
+  }
+
+  void _onHeartRateNotified(List<int> data) {
+    if (data.length < 2) {
+      _logger.d('HR notify (ignored, ${data.length}B): ${_hexStr(data)}');
+      return;
+    }
+    // [flags, bpm] — bpm is data[1] (uint8). Valid physiological range 7..249.
+    final bpm = data[1] & 0xFF;
+    _logger.d('HR notify: ${_hexStr(data)} -> $bpm bpm');
+    if (bpm >= 7 && bpm <= 249) {
+      _heartRate = bpm;
+      _lastSyncTime = DateTime.now();
+      activityStore.addHeartRateReadings(
+          [HeartRateReading(timestamp: _lastSyncTime!, value: bpm)]);
+      notifyListeners();
+    }
+  }
+
+  Future<void> _writeHrControl(List<int> cmd, String label) async {
+    if (_hrControlChar == null) return;
+    try {
+      // 0x2A39 advertises Write (with response) on MB6.
+      await _hrControlChar!.write(cmd, withoutResponse: false);
+      _logger.i('HR: wrote $label (${_hexStr(cmd)}) to 0x2A39.');
+    } catch (e) {
+      _logger.e('HR: failed to write $label: $e');
+    }
+  }
+
+  /// Start continuous realtime HR streaming (with the required ~14 s keep-alive).
+  Future<void> startRealtimeHeartRate() async {
+    if (!await _setupHeartRate()) return;
+    await _writeHrControl(_hrStopManual, 'stop-manual');
+    await _writeHrControl(_hrStartContinuous, 'start-continuous');
+    _realtimeHrActive = true;
+
+    // Keep-alive: the band stops streaming without a periodic 0x16 ping.
+    // Notify pings ~every 14 s; we use 12 s for margin.
+    _hrKeepAliveTimer?.cancel();
+    _hrKeepAliveTimer =
+        Timer.periodic(const Duration(seconds: 12), (_) async {
+      if (!_realtimeHrActive || _device == null || !_device!.isConnected) {
+        _hrKeepAliveTimer?.cancel();
+        return;
+      }
+      await _writeHrControl(_hrKeepAlivePing, 'keep-alive');
+    });
+    _logger.i('HR: realtime measurement started.');
+    notifyListeners();
+  }
+
+  /// Stop continuous realtime HR streaming.
+  Future<void> stopRealtimeHeartRate() async {
+    _hrKeepAliveTimer?.cancel();
+    _realtimeHrActive = false;
+    await _writeHrControl(_hrStopContinuous, 'stop-continuous');
+    _logger.i('HR: realtime measurement stopped.');
+    notifyListeners();
+  }
+
+  /// Trigger a single one-shot HR measurement (battery-friendly).
+  Future<void> measureHeartRateOnce() async {
+    if (!await _setupHeartRate()) return;
+    await _writeHrControl(_hrStopContinuous, 'stop-continuous');
+    await _writeHrControl(_hrStopManual, 'stop-manual');
+    await _writeHrControl(_hrStartManual, 'start-manual');
+    _logger.i('HR: one-shot measurement requested.');
   }
 
   // ---------------------------------------------------------------------------
-  // Battery level  (0x180f / 0x2a19)
+  // Battery level
+  //
+  // Mi Band 6 (legacy Huami) reports battery on the custom char fee0/0x0006:
+  //   payload = [flags, level%, chargeState, ...]  -> level is byte[1].
+  // (Confirmed in Gadgetbridge HuamiBatteryInfo and the decompiled Notify app
+  //  r6/b.java; see protocol-mb6.md §4.) We fall back to the standard
+  //  0x180F/0x2A19 service (level in byte[0]) if 0x0006 is unavailable.
   // ---------------------------------------------------------------------------
 
   Future<void> _readBattery() async {
@@ -852,38 +991,55 @@ class BLEManager extends ChangeNotifier {
 
     try {
       final services = await _device!.discoverServices();
-      BluetoothCharacteristic? battChar;
 
+      // Preferred: Huami fee0/0x0006 (level in byte[1]).
       for (final svc in services) {
-        if (svc.uuid.str.toLowerCase().contains('180f')) {
-          for (final char in svc.characteristics) {
-            if (char.uuid.str.toLowerCase().contains('2a19')) {
-              battChar = char;
-              break;
-            }
+        if (!svc.uuid.str.toLowerCase().contains('fee0')) continue;
+        for (final c in svc.characteristics) {
+          if (c.uuid.str.toLowerCase().contains('0006')) {
+            _battChar = c;
+            break;
           }
-          break;
         }
       }
 
-      if (battChar == null) {
-        _logger.e("Battery: 0x2a19 not found.");
+      if (_battChar != null) {
+        final raw = await _battChar!.read();
+        _applyHuamiBattery(raw);
+        try {
+          await _battChar!.setNotifyValue(true);
+          _battChar!.onValueReceived.listen(_applyHuamiBattery);
+        } catch (_) {}
         return;
       }
 
-      final raw = await battChar.read();
+      // Fallback: standard battery service 0x180F / 0x2A19 (level in byte[0]).
+      BluetoothCharacteristic? stdBatt;
+      for (final svc in services) {
+        if (!svc.uuid.str.toLowerCase().contains('180f')) continue;
+        for (final char in svc.characteristics) {
+          if (char.uuid.str.toLowerCase().contains('2a19')) {
+            stdBatt = char;
+            break;
+          }
+        }
+      }
+      if (stdBatt == null) {
+        _logger.e("Battery: neither fee0/0x0006 nor 0x2a19 found.");
+        return;
+      }
+      final raw = await stdBatt.read();
       if (raw.isNotEmpty) {
         _batteryLevel = raw[0].clamp(0, 100);
-        _logger.i("Battery: $_batteryLevel%");
+        _logger.i("Battery (0x2a19): $_batteryLevel%");
         notifyListeners();
       }
-
       try {
-        await battChar.setNotifyValue(true);
-        battChar.onValueReceived.listen((data) {
+        await stdBatt.setNotifyValue(true);
+        stdBatt.onValueReceived.listen((data) {
           if (data.isNotEmpty) {
             _batteryLevel = data[0].clamp(0, 100);
-            _logger.d("Battery update: $_batteryLevel%");
+            _logger.d("Battery update (0x2a19): $_batteryLevel%");
             notifyListeners();
           }
         });
@@ -893,9 +1049,24 @@ class BLEManager extends ChangeNotifier {
     }
   }
 
+  void _applyHuamiBattery(List<int> raw) {
+    // [flags, level%, chargeState, ...] — level is byte[1].
+    if (raw.length < 2) {
+      _logger.d("Battery (0x0006) short packet: ${_hexStr(raw)}");
+      return;
+    }
+    _batteryLevel = raw[1].clamp(0, 100);
+    final charging = raw.length >= 3 && raw[2] == 0x01;
+    _logger.i("Battery (0x0006): $_batteryLevel%${charging ? ' (charging)' : ''}");
+    notifyListeners();
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  String _hexStr(List<int> data) =>
+      data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
 
   Future<void> safeWrite(List<int> value) async {
     if (_device == null || !_device!.isConnected) {
