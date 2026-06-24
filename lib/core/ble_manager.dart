@@ -32,8 +32,6 @@ class MyTaskHandler extends TaskHandler {
 
 enum AuthState { notAuthenticated, authenticating, authenticated, failed }
 
-enum _AuthPhase { idle, waitingForChallenge, waitingForResult }
-
 class BLEManager extends ChangeNotifier {
   final BLELogger _logger;
   final StorageManager _storage;
@@ -78,7 +76,6 @@ class BLEManager extends ChangeNotifier {
   bool get isConnected => _device != null && _device!.isConnected;
   bool _isAuthenticating = false;
   AuthState _authState = AuthState.notAuthenticated;
-  _AuthPhase _authPhase = _AuthPhase.idle;
 
   BLEManager(this._logger, this._storage) {
     _loadPersistedData();
@@ -206,7 +203,6 @@ class BLEManager extends ChangeNotifier {
   void _handleDisconnect() {
     _isAuthenticating = false;
     _authState = AuthState.notAuthenticated;
-    _authPhase = _AuthPhase.idle;
     _authChar = null;
     _stepsChar = null;
     _hrMeasureChar = null;
@@ -300,22 +296,29 @@ class BLEManager extends ChangeNotifier {
       return;
     }
 
+    // The canonical Huami/Mi-Band auth characteristic is 0x0009
+    // (00000009-0000-3512-2118-0009af100700). On-device captures (findings-05)
+    // showed that authenticating on `fec1` only yields a non-standard, partial
+    // auth — enough for battery/steps but NOT the protected 0x180D HR service or
+    // activity-data responses. Prefer 0x0009; fall back to fec1 if absent.
+    BluetoothCharacteristic? authChar0009;
+    BluetoothCharacteristic? authCharFec1;
     for (var char in authService.characteristics) {
       final cuuid = char.uuid.str.toLowerCase();
       _logger.d("CHAR UUID: $cuuid");
-      if (cuuid.contains("fec1")) {
-        _logger.i("FEC1 FOUND");
-        _authChar = char;
-        break;
-      }
+      if (cuuid.startsWith("00000009-")) authChar0009 = char;
+      if (cuuid.contains("fec1")) authCharFec1 = char;
     }
+    _authChar = authChar0009 ?? authCharFec1;
 
     if (_authChar == null) {
-      _logger.e("FEC1 characteristic not found.");
+      _logger.e("No auth characteristic (0x0009 or fec1) found.");
       return;
     }
 
-    _logger.i("Found FEC1 characteristic. Starting auth handshake...");
+    _logger.i(authChar0009 != null
+        ? "Using canonical Huami auth char 0x0009. Starting auth handshake..."
+        : "Using fec1 auth char (0x0009 absent). Starting auth handshake...");
 
     // Proactively subscribe to status/init chars before auth success
     await _subscribeToMissingNotifications();
@@ -324,8 +327,19 @@ class BLEManager extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
-  // Authentication
+  // Authentication — canonical Huami / Mi Band 6 handshake (Gadgetbridge
+  // InitOperation). authFlags = AUTH_BYTE = 0x08; cryptFlags = 0x80 for MB6
+  // (MiBand4Support override, inherited by MB5/6). See findings-06.
+  //   → 01 08 <16-byte key>
+  //   ← 10 01 01            (key accepted; high bits in status are tolerated)
+  //   → 82 08 02 01 00      (request random; 0x80|0x02 because cryptFlags=0x80)
+  //   ← 10 02 01 <16 rand>
+  //   → 83 08 <AES-ECB(key, rand)>   (0x80|0x03)
+  //   ← 10 03 01            (auth success)
   // ---------------------------------------------------------------------------
+
+  static const int _authFlags = 0x08; // AUTH_BYTE
+  static const int _cryptFlags = 0x80; // MiBand4/5/6
 
   Future<void> _startAuthHandshake() async {
     if (_isAuthenticating) return;
@@ -366,10 +380,14 @@ class BLEManager extends ChangeNotifier {
         notifyListeners();
       });
 
-      _authPhase = _AuthPhase.waitingForChallenge;
-      _logger
-          .i("Auth Step 1: Sending [0x01, 0x00] + auth key (18 bytes total)");
-      await safeWrite([0x01, 0x00, ...authKeyBytes]);
+      // Mi Band 6 is an already-paired device with cryptFlags = 0x80, so
+      // Gadgetbridge sets needsAuth=false and SKIPS the send-key step — it goes
+      // straight to requesting the random number. We do the same: re-sending the
+      // key (01 08 …) to a paired band poisons the handshake (ends in status
+      // 0x07). authFlags = 0x08; the request is 5 bytes because cryptFlags≠0.
+      _logger.i("Auth: requesting random number "
+          "[0x${(_cryptFlags | 0x02).toRadixString(16)}, 0x08, 02, 01, 00]");
+      await safeWrite([_cryptFlags | 0x02, _authFlags, 0x02, 0x01, 0x00]);
     } catch (e) {
       _logger.e("Auth Handshake Error: $e");
       _isAuthenticating = false;
@@ -383,85 +401,68 @@ class BLEManager extends ChangeNotifier {
       "Received raw bytes: ${response.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')}",
     );
 
-    if (response.length >= 3 &&
-        response[0] == 0x10 &&
-        response[1] == 0x01 &&
-        response[2] == 0x01) {
-      _logger.i("Step 1 OK: sending challenge request [0x02, 0x00]...");
-      await safeWrite([0x02, 0x00]);
-    } else if (response.length >= 3 &&
-        response[0] == 0x10 &&
-        response[1] == 0x01 &&
-        response[2] == 0x04) {
-      _authTimeoutTimer?.cancel();
-      _logger.e("Step 1 FAILED: Band rejected auth key");
-      _failAuth();
-    } else if (response.length >= 3 &&
-        response[0] == 0x10 &&
-        response[1] == 0x02 &&
-        response[2] == 0x01) {
-      _logger.i("Step 2 OK: Challenge received. Encrypting...");
-      if (response.length < 19) {
-        _logger.e("Not enough challenge bytes: ${response.length}");
-        _failAuth();
-        return;
-      }
-      await _encryptAndSendStep3(response.sublist(3, 19));
-    } else if (response.length >= 3 &&
-        response[0] == 0x10 &&
-        response[1] == 0x03 &&
-        response[2] == 0x01) {
-      _authTimeoutTimer?.cancel();
-      _logger.i("Authentication SUCCESS! (standard V2)");
-      _isAuthenticating = false;
-      _authState = AuthState.authenticated;
-      notifyListeners();
-      _onAuthSuccess();
-    } else if (response.length >= 3 &&
-        response[0] == 0x10 &&
-        response[1] == 0x03 &&
-        response[2] == 0x04) {
-      _authTimeoutTimer?.cancel();
-      _logger.e("Step 3 FAILED: Encryption mismatch — wrong key");
-      _failAuth();
-    } else if (response.every((b) => b == 0xFF)) {
-      _authTimeoutTimer?.cancel();
-      _logger.e("Band rejected with 0xFF");
-      _failAuth();
-    } else if (_authPhase == _AuthPhase.waitingForChallenge &&
-        response.length >= 16 &&
-        response[0] != 0x10 &&
-        !response.every((b) => b == 0xFF)) {
-      // Huami V3: raw 32-byte challenge without 0x10 header
-      _authPhase = _AuthPhase.waitingForResult;
-      _logger.i("V3 challenge received. Encrypting 32 bytes...");
-      await _encryptAndSendStep3(response.sublist(0, 32));
-    } else if (_authPhase == _AuthPhase.waitingForResult) {
-      final hex = response
-          .sublist(0, response.length < 12 ? response.length : 12)
-          .map((e) => e.toRadixString(16).padLeft(2, '0'))
-          .join(' ');
-      _logger.d("Post-encrypt response: $hex...");
-
-      if (response.every((b) => b == 0xFF) ||
-          (response.length >= 3 &&
-              response[0] == 0x10 &&
-              response[2] == 0x04)) {
+    // Canonical Huami response framing: [0x10, cmd, status, ...payload]. The
+    // command/status bytes can carry the cryptFlags high bit (0x80), so mask the
+    // low nibble before comparing (matches Gadgetbridge `value[1] & 0x0f`).
+    if (response.length < 3 || response[0] != 0x10) {
+      if (response.every((b) => b == 0xFF)) {
         _authTimeoutTimer?.cancel();
-        _logger.e("Auth FAILED (post-encrypt rejection).");
+        _logger.e("Auth: band rejected with 0xFF");
         _failAuth();
       } else {
+        _logger.d("Auth: ignoring non-response frame");
+      }
+      return;
+    }
+
+    final cmd = response[1] & 0x0f;
+    final status = response[2] & 0x0f;
+    const success = 0x01;
+    const fail = 0x04;
+
+    if (cmd == 0x01) {
+      // Send-key response.
+      if (status == success) {
+        _logger.i("Auth Step 1 OK: requesting random number "
+            "[0x${(_cryptFlags | 0x02).toRadixString(16)}, 0x08, 02, 01, 00]");
+        // cryptFlags (0x80) is non-zero on MB6, so the request is 5 bytes.
+        await safeWrite([_cryptFlags | 0x02, _authFlags, 0x02, 0x01, 0x00]);
+      } else {
         _authTimeoutTimer?.cancel();
-        _logger.i(
-          "Authentication SUCCESS! Band streaming data. "
-          "First byte: 0x${response[0].toRadixString(16)}",
-        );
-        _authPhase = _AuthPhase.idle;
+        _logger.e("Auth Step 1 FAILED: band rejected key "
+            "(status=0x${response[2].toRadixString(16)})");
+        _failAuth();
+      }
+    } else if (cmd == 0x02) {
+      // Random-number response: [10, 82, 01, <16 random bytes>].
+      if (status == success && response.length >= 19) {
+        _logger.i("Auth Step 2 OK: random received, encrypting 16 bytes...");
+        await _encryptAndSendStep3(response.sublist(3, 19));
+      } else {
+        _authTimeoutTimer?.cancel();
+        _logger.e("Auth Step 2 FAILED (status=0x${response[2].toRadixString(16)}, "
+            "len=${response.length})");
+        _failAuth();
+      }
+    } else if (cmd == 0x03) {
+      // Encrypted-number response → final verdict.
+      _authTimeoutTimer?.cancel();
+      if (status == success) {
+        _logger.i("Authentication SUCCESS! (canonical Huami auth)");
         _isAuthenticating = false;
         _authState = AuthState.authenticated;
         notifyListeners();
         _onAuthSuccess();
+      } else if (status == fail) {
+        _logger.e("Auth Step 3 FAILED: encryption mismatch — wrong key");
+        _failAuth();
+      } else {
+        _logger.e("Auth Step 3 unexpected status "
+            "0x${response[2].toRadixString(16)}");
+        _failAuth();
       }
+    } else {
+      _logger.d("Auth: unhandled response cmd=0x${response[1].toRadixString(16)}");
     }
   }
 
@@ -481,8 +482,9 @@ class BLEManager extends ChangeNotifier {
         "Encrypted (${encrypted.length} bytes): "
         "${encrypted.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')}",
       );
-      _logger.i("Sending [0x03, 0x00] + encrypted bytes...");
-      await safeWrite([0x03, 0x00, ...encrypted]);
+      // 0x03 | cryptFlags(0x80) = 0x83, authFlags = 0x08.
+      _logger.i("Auth Step 3: Sending [0x83, 0x08] + encrypted bytes...");
+      await safeWrite([_cryptFlags | 0x03, _authFlags, ...encrypted]);
     } catch (e) {
       _logger.e("Encryption failed: $e");
       _failAuth();
@@ -1138,7 +1140,11 @@ class BLEManager extends ChangeNotifier {
     }
     if (_authChar != null) {
       try {
-        await _authChar!.write(value, withoutResponse: false);
+        // The canonical 0x0009 auth char is Write-Without-Response (like the
+        // other Huami chars); fec1 is Write-With-Response. Pick by property.
+        final noResp = !_authChar!.properties.write &&
+            _authChar!.properties.writeWithoutResponse;
+        await _authChar!.write(value, withoutResponse: noResp);
       } catch (e) {
         _logger.e("Write error: $e");
       }
