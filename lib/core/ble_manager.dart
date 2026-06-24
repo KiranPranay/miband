@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
+import 'dart:math';
 import 'logger.dart';
 import 'encryption.dart';
 import '../storage/secure_storage.dart';
@@ -12,8 +13,11 @@ import 'activity_sample.dart';
 import 'activity_fetcher.dart';
 import '../storage/activity_store.dart';
 import 'alert_manager.dart';
+import 'ecdh_b163.dart';
+import 'huami2021_chunked.dart';
 
 part 'hardware_test_session.dart';
+part 'huami2021_auth.dart';
 
 // Top-level callback required by flutter_foreground_task
 @pragma('vm:entry-point')
@@ -59,6 +63,19 @@ class BLEManager extends ChangeNotifier {
   // can disable the trigger button while a session is in progress.
   bool _isTestSessionRunning = false;
   bool get isTestSessionRunning => _isTestSessionRunning;
+
+  // Huami 2021 sign-key auth + encrypted chunked transport (see
+  // huami2021_auth.dart). Used when the band exposes fee0/0x0016+0x0017.
+  BluetoothCharacteristic? _chunkedWriteChar; // fee0/0x0016
+  BluetoothCharacteristic? _chunkedNotifyChar; // fee0/0x0017
+  StreamSubscription<List<int>>? _chunkedSub;
+  Huami2021ChunkedEncoder? _chunkedEncoder;
+  Huami2021ChunkedDecoder? _chunkedDecoder;
+  Uint8List? _privateEC;
+  Uint8List? _sessionKey; // derived shared session AES key (post sign-key auth)
+  int _mtu = 247;
+  bool get isSignKeyAuth => _chunkedEncoder != null;
+  Uint8List? get sessionKey => _sessionKey;
 
   bool _isReconnecting = false;
   bool _userDisconnected = false;
@@ -213,6 +230,7 @@ class BLEManager extends ChangeNotifier {
     _hrSubscription?.cancel();
     _hrKeepAliveTimer?.cancel();
     _realtimeHrActive = false;
+    _disposeChunked();
     // NOTE: _metrics is intentionally NOT reset — we keep the last known values
     // so the UI can still display historical data while disconnected.
     _batteryLevel = null;
@@ -277,11 +295,15 @@ class BLEManager extends ChangeNotifier {
       // Discover Custom Alert Service (fee0)
       if (uuid.contains("fee0")) {
         for (var char in svc.characteristics) {
-          if (char.uuid.str.toLowerCase() == "00000020-0000-3512-2118-0009af100700") {
+          final cu = char.uuid.str.toLowerCase();
+          if (cu == "00000020-0000-3512-2118-0009af100700") {
             _alertChar = char;
             alertManager.setCharacteristic(_alertChar);
             _logger.i("Found Custom Alert Characteristic (0x0020)");
           }
+          // Huami 2021 chunked transport (sign-key auth + encrypted data).
+          if (cu.startsWith("00000016-")) _chunkedWriteChar = char;
+          if (cu.startsWith("00000017-")) _chunkedNotifyChar = char;
         }
       }
 
@@ -310,6 +332,16 @@ class BLEManager extends ChangeNotifier {
       if (cuuid.contains("fec1")) authCharFec1 = char;
     }
     _authChar = authChar0009 ?? authCharFec1;
+
+    // This firmware requires the Huami 2021 sign-key (ECDH) auth over the
+    // chunked transport (findings-06). Prefer it when 0x0016/0x0017 are present;
+    // otherwise fall back to the legacy handshake.
+    if (hasChunkedTransport) {
+      _logger.i("Chunked transport (0x0016/0x0017) present — "
+          "using Huami 2021 sign-key auth.");
+      await start2021Auth();
+      return;
+    }
 
     if (_authChar == null) {
       _logger.e("No auth characteristic (0x0009 or fec1) found.");
