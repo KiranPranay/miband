@@ -265,24 +265,34 @@ extension HardwareTestSession on BLEManager {
           '0x2A39 props write=${cp.properties.write} '
           'writeNR=${cp.properties.writeWithoutResponse}');
 
-      // Genuinely exercise the CCCD write: disable, then re-enable.
+      // Root-cause probe: log the Android bond state. On-device captures showed
+      // the link reporting unbonded / "Encryption LE: null", which correlates
+      // with the CCCD rejection (findings-05).
+      _logger.i('MB6TEST GATE3: bond state = ${await currentBondState()}');
+
+      // Attempt 1 — enable the CCCD as-is (disable→enable to truly exercise it).
       try {
         await m.setNotifyValue(false);
       } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 300));
-      try {
-        await m.setNotifyValue(true);
-        _pass(3, '0x2A37 CCCD enabled — no GATT_WRITE_NOT_PERMITTED; the '
-            '"post-auth sequencing" theory HOLDS');
+      var enabled = await _tryEnableCccd(m, 'attempt-1 (no bond)');
+
+      // Attempt 2 — if rejected, bond/encrypt the link and retry once. This
+      // tests the "link must be encrypted" hypothesis on hardware.
+      if (!enabled && _device != null && _device!.isConnected) {
+        _logger.i('MB6TEST GATE3: CCCD rejected — bonding the link, then retry…');
+        await _ensureLinkEncrypted();
+        enabled = await _tryEnableCccd(m, 'attempt-2 (after createBond)');
+      }
+
+      if (enabled) {
+        _pass(3, '0x2A37 CCCD enabled — bond=${await currentBondState()}');
         passed.add(3);
-      } catch (e) {
-        final code = e is FlutterBluePlusException ? e.code : null;
-        final desc = e is FlutterBluePlusException ? e.description : '$e';
-        _fail(3, 'setNotifyValue(0x2A37) threw ${e.runtimeType} '
-            'code=$code desc="$desc" | 0x2A37 props '
+      } else {
+        _fail(3, '0x2A37 CCCD still rejected after bond attempt — '
+            'bond=${await currentBondState()}, props '
             'notify=${m.properties.notify} indicate=${m.properties.indicate} '
-            'write=${m.properties.write} | "post-auth sequencing" theory '
-            'REFUTED — CCCD enable is genuinely rejected post-auth');
+            'write=${m.properties.write}');
         skipped.addAll({4, 5});
         return (passed: passed, skipped: skipped);
       }
@@ -457,6 +467,22 @@ extension HardwareTestSession on BLEManager {
   // -------------------------------------------------------------------------
   // Banner helpers (the greppable headline tokens)
   // -------------------------------------------------------------------------
+  /// Try to enable the 0x2A37 CCCD; log + return false on rejection (capturing
+  /// the exact GATT code, e.g. 3 = WRITE_NOT_PERMITTED).
+  Future<bool> _tryEnableCccd(BluetoothCharacteristic m, String label) async {
+    try {
+      await m.setNotifyValue(true);
+      _logger.i('MB6TEST GATE3: $label — CCCD enabled OK');
+      return true;
+    } catch (e) {
+      final code = e is FlutterBluePlusException ? e.code : null;
+      final desc = e is FlutterBluePlusException ? e.description : '$e';
+      _logger.e('MB6TEST GATE3: $label — setNotifyValue(0x2A37) threw '
+          '${e.runtimeType} code=$code desc="$desc"');
+      return false;
+    }
+  }
+
   void _pass(int gate, String detail) =>
       _logger.i('MB6TEST GATE$gate: PASS — $detail');
 

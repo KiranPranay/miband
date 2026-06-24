@@ -774,8 +774,14 @@ class BLEManager extends ChangeNotifier {
         }
       }
       if (configChar != null) {
-        _logger.i("Setting $label via 0003...");
-        await configChar.write(cmd, withoutResponse: false);
+        // fee0/0x0003 on Mi Band 6 only supports Write-Without-Response; using
+        // write-with-response throws "WRITE property not supported" (captured
+        // on-device, findings-05). Pick the type the characteristic advertises.
+        final useNoResponse = !configChar.properties.write &&
+            configChar.properties.writeWithoutResponse;
+        _logger.i("Setting $label via 0003 "
+            "(withoutResponse=$useNoResponse)...");
+        await configChar.write(cmd, withoutResponse: useNoResponse);
       }
     } catch (e) {
       _logger.e("Failed to set $label: $e");
@@ -869,6 +875,45 @@ class BLEManager extends ChangeNotifier {
 
   bool get isRealtimeHeartRateActive => _realtimeHrActive;
 
+  /// Enable third-party HR access (`06 1f 00 01` → config char fee0/0x0003).
+  /// Tested in findings-05 — does NOT unlock the `0x2A37` CCCD on this firmware.
+  /// Kept for reference / the gated runner's experiments.
+  Future<void> enableHrThirdPartyAccess() async {
+    await _writeConfig([0x06, 0x1f, 0x00, 0x01], 'enable HR third-party access');
+  }
+
+  /// Returns the device's current Android bond state (with a short timeout so it
+  /// never hangs). Used by HR setup + the hardware test session.
+  Future<BluetoothBondState> currentBondState() async {
+    if (_device == null) return BluetoothBondState.none;
+    try {
+      return await _device!.bondState.first
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      return BluetoothBondState.none;
+    }
+  }
+
+  /// Ensure the LE link is bonded/encrypted before touching the protected HR
+  /// characteristic. On-device captures (findings-05) show the band reporting
+  /// `Encryption LE: null` / "unbonded device" and rejecting the `0x2A37` CCCD
+  /// with `GATT_WRITE_NOT_PERMITTED`, so we proactively create the bond.
+  Future<void> _ensureLinkEncrypted() async {
+    if (_device == null || !_device!.isConnected) return;
+    try {
+      final bond = await currentBondState();
+      _logger.i('HR: link bond state = $bond');
+      if (bond != BluetoothBondState.bonded) {
+        _logger.i('HR: link not bonded — requesting createBond()...');
+        await _device!.createBond();
+        _logger.i('HR: createBond() done, bond = ${await currentBondState()}');
+        await Future.delayed(const Duration(milliseconds: 400));
+      }
+    } catch (e) {
+      _logger.e('HR: _ensureLinkEncrypted failed: $e');
+    }
+  }
+
   /// Discover the standard 0x180D HR characteristics and subscribe to 0x2A37.
   /// Safe to call multiple times.
   Future<bool> _setupHeartRate() async {
@@ -896,6 +941,12 @@ class BLEManager extends ChangeNotifier {
           'indicate=${_hrMeasureChar!.properties.indicate}; '
           '0x2A39 props write=${_hrControlChar!.properties.write}, '
           'writeNR=${_hrControlChar!.properties.writeWithoutResponse}');
+
+      // NOTE: the "expose HR to third party" command (06 1f 00 01 → fee0/0x0003)
+      // was tested (findings-05) and does NOT unlock the 0x2A37 CCCD — refuted.
+      // The captured root cause is the LE link not being encrypted/bonded; the
+      // fix is established in _ensureLinkEncrypted() below.
+      await _ensureLinkEncrypted();
 
       try {
         await _hrMeasureChar!.setNotifyValue(true);
