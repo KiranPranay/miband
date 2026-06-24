@@ -16,7 +16,16 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | `hardware-test-session.md` | **Runnable** gated session guide (gates 0→6) for the physical band. |
 | `test-results-NN.md` | Per-run results template (fill after each hardware run; never overwrite). |
 
-## Headline result — CORRECTED on hardware (findings-06)
+## ✅ SOLVED (findings-07) — HR works on the real band
+- Implemented the Huami **2021 sign-key (ECDH) auth** (`ecdh_b163.dart` +
+  `huami2021_chunked.dart` + `huami2021_auth.dart`, all unit-tested). On hardware:
+  `2021 SIGN-KEY AUTHENTICATION SUCCESS` → **all 7 gates pass**
+  (`MB6TEST SUMMARY p=7 … [0:P 1:P 2:P 3:P 4:P 5:P 6:P]`): real BPM=68, HR sustained
+  90 s at the 12 s keep-alive, activity parsed. Full auth unlocks the standard
+  `0x2A37/0x2A39` HR service + fee0 fetch (no data needs the chunked channel).
+- Normal-use path verified: `HR notify: 00 49 -> 73 bpm`. See `test-results-01.md`.
+
+## Root-cause history (findings-06)
 - **This Mi Band 6 firmware requires the Huami SIGN-KEY (ECDH / 2021-class) auth.**
   On-device proof: the canonical legacy AES-ECB handshake now runs perfectly
   through all 3 steps but the band's final status is `0x07` = **"sign key failed"**
@@ -55,6 +64,13 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
   enum contradiction adjudicated (MB6 = `MILI_PANGU`); implemented HR realtime +
   one-shot, battery `fee0/0x0006`, 8-byte activity samples + HR-from-activity, SpO2
   type fix. Code in `ble_manager.dart` + `activity_fetcher.dart`.
+- **04-07** (2026-06-24/25): autonomous adb hardware loop. Built a headless
+  intent trigger; baseline showed Gate 3 `WRITE_NOT_PERMITTED (code=3)`; refuted
+  the third-party-flag and bonding hypotheses; switched auth to the canonical
+  `0x0009` char and found status `0x07` = sign-key-failed → the band needs the
+  Huami 2021 **sign-key/ECDH** auth (findings-06). Ported `ECDH_B163` +
+  Huami2021 chunked transport (unit-tested) and implemented the sign-key handshake
+  (findings-07) → **all 7 gates pass, HR works** on the real band.
 - **03** (2026-06-24): hardware test-session instrumentation — gated runner
   (`hardware_test_session.dart`) running gates 0→6 halt-on-fail with one greppable
   `MB6TEST GATEn` banner each, capture-on-fail dumps (Gate 3 GATT code, Gate 6 raw

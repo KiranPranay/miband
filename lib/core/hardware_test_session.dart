@@ -153,7 +153,9 @@ extension HardwareTestSession on BLEManager {
   // -------------------------------------------------------------------------
   Future<bool> _gate1Auth() async {
     if (_authState == AuthState.authenticated) {
-      _pass(1, 'authenticated (legacy AES-ECB handshake succeeded, no 0xFF)');
+      _pass(1,
+          isSignKeyAuth ? 'authenticated (Huami 2021 sign-key/ECDH auth)'
+              : 'authenticated (legacy AES-ECB handshake, no 0xFF)');
       return true;
     }
     _fail(1, 'NOT authenticated (state=$_authState) — auth must complete first. '
