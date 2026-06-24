@@ -11,7 +11,10 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | `diff-our-vs-correct.md` | Living "we do X / correct is Y" table. |
 | `findings-01.md` | Setup, Gadgetbridge extraction, Notify package map, hypothesis test. |
 | `findings-02.md` | Notify deep-dive (HR/fetch/battery/device-model) + implementation. |
+| `findings-03.md` | Hardware test-session instrumentation (gated runner + auto-probe). |
 | `verification-checklist.md` | Per-claim → log-line checklist to confirm fixes on the real band. |
+| `hardware-test-session.md` | **Runnable** gated session guide (gates 0→6) for the physical band. |
+| `test-results-NN.md` | Per-run results template (fill after each hardware run; never overwrite). |
 
 ## Headline result (findings-01)
 - **Mi Band 6 = legacy Huami protocol**, *not* the 2021 chunked channel.
@@ -33,7 +36,9 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | Battery spec | ✅ confirmed (`fee0/0x0006`) |
 | Implement HR (realtime + one-shot) in Dart | ✅ done (`ble_manager.dart`) |
 | Implement battery + activity-fetch fixes | ✅ done |
-| Verify on device (log checklist) | ⏳ pending real-device run (see `verification-checklist.md`) |
+| Hardware test-session runner (gates 0→6, halt-on-fail) | ✅ done (`hardware_test_session.dart`) |
+| Gate-5 keep-alive auto-probe (12/8/15 s) | ✅ done |
+| Verify on device (run gated session) | ⏳ pending real-device run → fill `test-results-01.md` |
 
 ## Iteration log
 - **01** (2026-06-24): decompile setup, GB extraction, Notify map, hypothesis refuted.
@@ -41,3 +46,9 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
   enum contradiction adjudicated (MB6 = `MILI_PANGU`); implemented HR realtime +
   one-shot, battery `fee0/0x0006`, 8-byte activity samples + HR-from-activity, SpO2
   type fix. Code in `ble_manager.dart` + `activity_fetcher.dart`.
+- **03** (2026-06-24): hardware test-session instrumentation — gated runner
+  (`hardware_test_session.dart`) running gates 0→6 halt-on-fail with one greppable
+  `MB6TEST GATEn` banner each, capture-on-fail dumps (Gate 3 GATT code, Gate 6 raw
+  hex), and a Gate-5 keep-alive auto-probe (12→8→15 s). Trigger in Settings →
+  Developer. Adds `hardware-test-session.md` + `test-results-01.md` template.
+  No protocol opcodes changed.
