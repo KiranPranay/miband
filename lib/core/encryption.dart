@@ -29,4 +29,30 @@ class BLEEncryption {
 
     return enc;
   }
+
+  /// Decrypts an AES-ECB (no padding) payload. Used by the Huami 2021 chunked
+  /// decoder to decrypt encrypted notification frames.
+  static Uint8List decryptAESECB(Uint8List key, Uint8List payload) {
+    if (key.length != 16) {
+      throw Exception('Key must be exactly 16 bytes. Length: ${key.length}');
+    }
+    if (payload.isEmpty || payload.length % 16 != 0) {
+      throw Exception(
+        'Payload must be a non-empty multiple of 16 bytes. Length: ${payload.length}',
+      );
+    }
+
+    final cipher = BlockCipher('AES/ECB')
+      ..init(
+        false, // decrypt
+        KeyParameter(key),
+      );
+
+    final dec = Uint8List(payload.length);
+    for (int offset = 0; offset < payload.length; offset += 16) {
+      cipher.processBlock(payload, offset, dec, offset);
+    }
+
+    return dec;
+  }
 }
