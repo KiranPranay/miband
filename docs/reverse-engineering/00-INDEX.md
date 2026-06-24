@@ -10,7 +10,8 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | `protocol-mb6.md` | **Authoritative spec** — UUIDs, opcodes, byte layouts, sources. |
 | `diff-our-vs-correct.md` | Living "we do X / correct is Y" table. |
 | `findings-01.md` | Setup, Gadgetbridge extraction, Notify package map, hypothesis test. |
-| `findings-02.md` | Notify deep-dive (HR/fetch/battery/device-model). *(in progress)* |
+| `findings-02.md` | Notify deep-dive (HR/fetch/battery/device-model) + implementation. |
+| `verification-checklist.md` | Per-claim → log-line checklist to confirm fixes on the real band. |
 
 ## Headline result (findings-01)
 - **Mi Band 6 = legacy Huami protocol**, *not* the 2021 chunked channel.
@@ -26,14 +27,17 @@ by extracting the real wire protocol from the **Notify** (`com.mc.miband1`) and
 | Toolchain (jadx/apktool) + decompile Notify | ✅ done |
 | Gadgetbridge clean-room reference | ✅ extracted |
 | Locate Notify protocol packages | ✅ mapped (`x5/`, `com/mc/miband1/bluetooth/`) |
-| Test chunked hypothesis | ✅ refuted for MB6 (GB); Notify confirm pending |
-| Realtime HR spec | ✅ from GB; ⏳ Notify confirm |
-| Activity/HR-history/SpO2 fetch spec | ⏳ partial; exact MB6 layout pending |
-| Battery spec | ✅ from GB; ⏳ Notify confirm |
-| Implement HR (realtime) in Dart | ⏳ pending findings-02 |
-| Implement battery + fetch fixes | ⏳ pending |
-| Verify on device (log checklist) | ⏳ pending |
+| Test chunked hypothesis | ✅ refuted for MB6 (GB **and** Notify) |
+| Realtime HR spec | ✅ confirmed (GB + Notify) incl. keep-alive ping |
+| Activity/HR-history/SpO2 fetch spec | ✅ confirmed (8-byte layout, correct types) |
+| Battery spec | ✅ confirmed (`fee0/0x0006`) |
+| Implement HR (realtime + one-shot) in Dart | ✅ done (`ble_manager.dart`) |
+| Implement battery + activity-fetch fixes | ✅ done |
+| Verify on device (log checklist) | ⏳ pending real-device run (see `verification-checklist.md`) |
 
 ## Iteration log
 - **01** (2026-06-24): decompile setup, GB extraction, Notify map, hypothesis refuted.
-- **02**: Notify deep-dive (next).
+- **02** (2026-06-24): Notify deep-dive confirmed legacy HR/fetch/battery + keep-alive;
+  enum contradiction adjudicated (MB6 = `MILI_PANGU`); implemented HR realtime +
+  one-shot, battery `fee0/0x0006`, 8-byte activity samples + HR-from-activity, SpO2
+  type fix. Code in `ble_manager.dart` + `activity_fetcher.dart`.

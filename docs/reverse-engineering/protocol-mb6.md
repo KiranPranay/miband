@@ -20,8 +20,15 @@ Consequences:
   `0x2A37` measurement).
 - **Activity/HR-history/SpO2 fetch** = legacy `fee0/0x0004`(control)+`0x0005`(data).
 - **Battery** = Huami `fee0/0x0006` (and/or standard `0x180F/0x2A19`).
-- The chunked `0x0016/0x0017` channel is **not used**. Its full spec is kept in the
-  Appendix for completeness only.
+- The chunked `0x0016/0x0017` channel is **not used for HR/activity/battery**. (Per
+  Notify, newer MB6 firmware ≥ `1.0.4.1` that advertises an encryption capability
+  *can* route encrypted *config/handshake commands* over it — but Gadgetbridge drives
+  MB6 entirely in plaintext, and our band's plaintext auth/alerts already work, so we
+  do not need it. Full spec in Appendix A as a future contingency.)
+
+> **Device-enum note (findings-02 §6):** in Notify, Mi Band 6 = enum `MILI_PANGU`
+> (`G1`, id 211) / `MILI_PANGU_L` (`H1`, id 212), displayed "Mi Band 6 (NFC)".
+> `MILI_L66` (id 262) is **Mi Band 7**, not 6.
 
 ## 1. Services & characteristics
 
@@ -74,7 +81,8 @@ No session key, no post-auth encryption.
 ## 3. Realtime heart rate  ✅ (the fix)
 
 Source: **GB** `HuamiSupport.java:1509-1554, 594-597, 2181-2193`,
-`MiBandService.java:186-187`. **NOTIFY confirmation: pending (findings-02).**
+`MiBandService.java:186-187`. **NOTIFY CONFIRMED** (`x5/e.java` z0/y/q/L,
+`BLEManager.java` m1/l1; findings-02 §2).
 
 **Characteristics:** control = `0x2A39`, measurement/notify = `0x2A37` (service `0x180D`).
 
@@ -99,26 +107,45 @@ Source: **GB** `HuamiSupport.java:1509-1554, 594-597, 2181-2193`,
 (Some firmwares also send `len>2` with a flags byte per BT HR spec — handle both:
 if `b[0] & 0x01` the value is uint16 at `b[1..2]`, else uint8 at `b[1]`.) **UNVERIFIED** for MB6 — confirm in 02.
 
-**Keep-alive:** continuous mode appears self-sustaining (GB sends no `0x16` ping).
-**UNVERIFIED** — confirm whether Notify pings; if HR stops after ~30 s add a
-periodic re-issue of `15 01 01` or a `0x16` ping.
+**Keep-alive:** ✅ **CONFIRMED REQUIRED.** Notify writes a single byte `16` to
+`0x2A39` ≈ every 14 s while continuous HR is active (`x5/e.java` `L()` L3674,
+driven by `BLEManager.l1()` L2877 with a 14000 ms threshold). Without it the band
+stops streaming. Our impl pings every 12 s (margin). (GB's MB6 base omits it; Notify
+— the app that works with the user's band — sends it, so we follow Notify.)
 
 ## 4. Battery
 
 Source: **GB** `HuamiService.java:46`, `HuamiSupport.java:546,601,2511`,
-`HuamiBatteryInfo.java`.
+`HuamiBatteryInfo.java`. **NOTIFY CONFIRMED** (`x5/e.java` B1, `r6/b.java` e();
+findings-02 §4).
 
 - Read + notify `fee0/0x0006`.
-- Payload layout (`HuamiBatteryInfo`): `byte[1]` = level %, `byte[2]` = charge
-  state (0 normal, 1 charging). (**confirm exact offsets in 02**.)
-- `0x180F/0x2A19` (our current path) returns level in `byte[0]`; keep as fallback.
+- Payload layout: `byte[0]` = flags, `byte[1]` = level %, `byte[2]` = charge state
+  (0 normal, 1 charging; present when flags bit0 set).
+- `0x180F/0x2A19` returns level in `byte[0]`; used only as a fallback (it is the
+  ZeppOS path, not MB6's canonical source).
 
 ## 5. Activity / HR-history / SpO2 fetch (legacy char-based)
 
 Source: **GB** `operations/fetch/AbstractFetchOperation.java`,
 `FetchActivityOperation.java`; chars `fee0/0x0004`+`0x0005`
 (**GB** `HuamiService.java:44-45`). MB6 sample size = **8 bytes**
-(**GB** `MiBand6Support.java:75`). **NOTIFY confirmation + exact MB6 layout: pending (findings-02).**
+(**GB** `MiBand6Support.java:75`). **NOTIFY CONFIRMED** (`x5/e.java` N2/onNotify,
+`helper/b.java` r()/s(); findings-02 §3).
+
+**Data-type byte (2nd byte of start cmd):** `01`=activity (steps+HR+intensity+sleep,
+8-byte stream), `05`=HR/manual-HR history, `0D`=sleep, `12`=stress, `13`=stress
+all-day, **`25`=SpO2**, `26`=SpO2 variant, `07`=raw log. ⚠️ `0x12` is **stress**
+(not SpO2) and `0x0D` is **sleep** (not HR) — both were wrong in the old code.
+
+**MB6 8-byte sample layout:** `[0]`category/kind, `[1]`intensity, `[2]`steps
+(single byte 0-255), `[3]`**heart rate** (0/255 ⇒ no reading), `[4]`unknown1,
+`[5]`sleep, `[6]`deepSleep, `[7]`remSleep; sample N = start + N minutes. HR history
+is read from byte 3 here — there is no separate per-minute HR fetch.
+
+**Metadata response** (`← 0x0004`): `10 01 01 | count(uint32 LE @bytes3-6, excludes
+per-packet counter bytes) | start-timestamp(@bytes7-14)`. ⚠️ byte 7 is the echoed
+start date, **not** a sample size.
 
 High-level handshake (our `activity_fetcher.dart` already follows this shape):
 ```
@@ -129,8 +156,8 @@ High-level handshake (our `activity_fetcher.dart` already follows this shape):
 ← 0004: 10 02 01                                                        (transfer done)
 → 0004: 03                                                              (ack/stop)
 ```
-**Open:** exact `type` values (activity vs HR vs SpO2), the MB6 8-byte sample
-layout, and the precise data-stream framing — to be pinned down in findings-02.
+Per-packet data framing (`← 0005`): `byte[0]`=sequence counter (drop), `byte[1..]`=
+payload, accumulated until `count` bytes received.
 
 ## 6. Time, display, user info, fitness goal (config char `fee0/0x0003`)
 - Time sync: GB writes the 11-byte time blob to the **Current Time** char
