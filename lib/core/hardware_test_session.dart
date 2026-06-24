@@ -95,6 +95,14 @@ extension HardwareTestSession on BLEManager {
           _authState == AuthState.authenticated &&
           passed.contains(3)) {
         _logger.i('MB6TEST: restoring normal realtime HR after session.');
+        // Null the cached chars + listener so startRealtimeHeartRate()'s
+        // _setupHeartRate() takes the full path and re-installs the normal HR
+        // notification listener (it early-returns when chars are already set,
+        // which would otherwise leave live HR without a subscriber).
+        await _hrSubscription?.cancel();
+        _hrSubscription = null;
+        _hrMeasureChar = null;
+        _hrControlChar = null;
         await startRealtimeHeartRate();
       }
       _isTestSessionRunning = false;
