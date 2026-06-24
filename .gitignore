@@ -45,3 +45,9 @@ app.*.map.json
 /android/app/release
 
 gadgetbridge/
+
+# Reverse-engineering working artifacts (large; keep notes in docs/ instead)
+/tools/
+/ref_apks/decompiled/
+/ref_apks/notify/*.apkm
+/ref_apks/mifit/*.apk
