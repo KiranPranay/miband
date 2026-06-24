@@ -24,6 +24,10 @@ class ActivityFetcher {
 
   ActivityFetcher(this._logger, this._device);
 
+  /// Read-only view of the most recently accumulated raw fetch payload.
+  /// Used by the hardware test session to hex-dump bytes when parsing fails.
+  List<int> get lastRawBuffer => List.unmodifiable(_dataBuffer);
+
   Future<bool> init() async {
     try {
       final services = await _device.discoverServices();

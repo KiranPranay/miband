@@ -13,6 +13,8 @@ import 'activity_fetcher.dart';
 import '../storage/activity_store.dart';
 import 'alert_manager.dart';
 
+part 'hardware_test_session.dart';
+
 // Top-level callback required by flutter_foreground_task
 @pragma('vm:entry-point')
 void startCallback() {
@@ -54,6 +56,11 @@ class BLEManager extends ChangeNotifier {
   Timer? _reconnectTimer;
   Timer? _hrKeepAliveTimer;
   bool _realtimeHrActive = false;
+
+  // Hardware test session (see hardware_test_session.dart). Exposed so the UI
+  // can disable the trigger button while a session is in progress.
+  bool _isTestSessionRunning = false;
+  bool get isTestSessionRunning => _isTestSessionRunning;
 
   bool _isReconnecting = false;
   bool _userDisconnected = false;
@@ -1067,6 +1074,11 @@ class BLEManager extends ChangeNotifier {
 
   String _hexStr(List<int> data) =>
       data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+
+  /// Internal forwarder so the [HardwareTestSession] extension (a different
+  /// scope than this class) can request a UI refresh without touching the
+  /// `@protected` notifyListeners directly.
+  void _emitChange() => notifyListeners();
 
   Future<void> safeWrite(List<int> value) async {
     if (_device == null || !_device!.isConnected) {

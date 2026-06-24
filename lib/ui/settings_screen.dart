@@ -84,8 +84,44 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const DebugConsole()),
             ),
           ),
+          _SettingsTile(
+            icon: bleManager.isTestSessionRunning
+                ? Icons.hourglass_top
+                : Icons.science_outlined,
+            title: 'Run Hardware Test',
+            subtitle: bleManager.isTestSessionRunning
+                ? 'Running gates 0→6 — watch the Debug Log…'
+                : 'Verify HR / battery / fetch on the band (wear it first)',
+            iconColor: bleManager.isTestSessionRunning
+                ? Colors.amberAccent
+                : Colors.lightGreenAccent,
+            onTap: () => _onRunHardwareTest(context, bleManager),
+          ),
         ],
       ),
+    );
+  }
+
+  void _onRunHardwareTest(BuildContext context, BLEManager bleManager) {
+    final messenger = ScaffoldMessenger.of(context);
+    if (bleManager.isTestSessionRunning) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Hardware test already running — see Debug Log'),
+      ));
+      return;
+    }
+    if (!bleManager.isConnected ||
+        bleManager.authState != AuthState.authenticated) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Connect & authenticate the band first'),
+      ));
+      return;
+    }
+    // Fire-and-forget; the session logs MB6TEST banners to the Debug Log.
+    bleManager.runHardwareTestSession();
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const DebugConsole()),
     );
   }
 }
