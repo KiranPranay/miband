@@ -42,15 +42,16 @@ extension HardwareTestSession on BLEManager {
     final passed = <int>{};
     final skipped = <int>{};
     const total = 7; // gates 0..6
+    final fw = await _readFirmwareVersion();
 
     try {
-      _logger.i('MB6TEST SESSION START — gates 0..6 '
+      _logger.i('MB6TEST SESSION START — gates 0..6 fw=$fw '
           '(band must be CONNECTED, authenticated, and WORN)');
 
       // ---- GATE 0: discovery ----
       final g0 = await _gate0Discovery();
       if (g0.halt) {
-        _finishSession(passed, skipped, total);
+        _finishSession(passed, skipped, total, fw);
         return;
       }
       if (g0.pass) passed.add(0);
@@ -59,7 +60,7 @@ extension HardwareTestSession on BLEManager {
       if (await _gate1Auth()) {
         passed.add(1);
       } else {
-        _finishSession(passed, skipped, total);
+        _finishSession(passed, skipped, total, fw);
         return; // halt — the refactor must not have disturbed auth
       }
 
@@ -82,7 +83,7 @@ extension HardwareTestSession on BLEManager {
       // ---- GATE 6: activity fetch (terminal) ----
       if (await _gate6ActivityFetch()) passed.add(6);
 
-      _finishSession(passed, skipped, total);
+      _finishSession(passed, skipped, total, fw);
     } catch (e, st) {
       _logger.e('MB6TEST SESSION ERROR — $e\n$st');
     } finally {
@@ -462,7 +463,7 @@ extension HardwareTestSession on BLEManager {
   void _fail(int gate, String detail) =>
       _logger.e('MB6TEST GATE$gate: FAIL — $detail');
 
-  void _finishSession(Set<int> passed, Set<int> skipped, int total) {
+  void _finishSession(Set<int> passed, Set<int> skipped, int total, String fw) {
     final map = List.generate(total, (g) {
       if (passed.contains(g)) return '$g:P';
       if (skipped.contains(g)) return '$g:S';
@@ -470,5 +471,30 @@ extension HardwareTestSession on BLEManager {
     }).join(' ');
     _logger.i('MB6TEST SESSION END — ${passed.length}/$total passed, '
         '${skipped.length} skipped  [$map]');
+    // Single-line machine-parseable summary (grep `MB6TEST SUMMARY`).
+    _logger.i('MB6TEST SUMMARY p=${passed.length} s=${skipped.length} '
+        'gates=[$map] fw=$fw');
+  }
+
+  /// Best-effort firmware version read from the standard Device Information
+  /// Service (0x180A → Firmware Revision String 0x2A26). Returns "unknown" if
+  /// the band does not expose it (Huami often reports firmware via a private
+  /// command instead). Never throws.
+  Future<String> _readFirmwareVersion() async {
+    try {
+      if (_device == null || !_device!.isConnected) return 'unknown';
+      final services = await _device!.discoverServices();
+      for (final svc in services) {
+        if (!svc.uuid.str.toLowerCase().contains('180a')) continue;
+        for (final c in svc.characteristics) {
+          if (!c.uuid.str.toLowerCase().contains('2a26')) continue;
+          if (!c.properties.read) continue;
+          final raw = await c.read();
+          final s = String.fromCharCodes(raw.where((b) => b >= 0x20 && b < 0x7f));
+          return s.trim().isEmpty ? 'unknown' : s.trim();
+        }
+      }
+    } catch (_) {}
+    return 'unknown';
   }
 }

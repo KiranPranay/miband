@@ -49,5 +49,7 @@ gadgetbridge/
 # Reverse-engineering working artifacts (large; keep notes in docs/ instead)
 /tools/
 /ref_apks/decompiled/
+# Raw device logcat captures (findings quote the relevant lines inline)
+/docs/reverse-engineering/logs/
 /ref_apks/notify/*.apkm
 /ref_apks/mifit/*.apk
