@@ -159,6 +159,23 @@ High-level handshake (our `activity_fetcher.dart` already follows this shape):
 Per-packet data framing (`← 0005`): `byte[0]`=sequence counter (drop), `byte[1..]`=
 payload, accumulated until `count` bytes received.
 
+## 5b. Realtime steps/distance/calories — `fee0/0x0007` (read + notify)
+
+Source: on-device capture (findings-07 follow-up). **READ** the char for the
+current daily total (notify only fires while the count changes); also subscribe
+to notify for live updates. 13-byte packet, e.g. `0c 13 00 00 00 0d 00 00 00 01
+00 00 00`:
+| bytes | field |
+|---|---|
+| `[0]` | category/flag |
+| `[1..2]` | steps (uint16 LE) — running daily total |
+| `[3..4]` | unknown / 0 |
+| `[5..8]` | distance in **metres** (uint32 LE) |
+| `[9..12]` | calories (uint32 LE) |
+
+⇒ that example = 19 steps, 13 m, 1 kcal. (GB only reads steps from this char;
+distance/calories at `[5..8]`/`[9..12]` confirmed from the real packet.)
+
 ## 6. Time, display, user info, fitness goal (config char `fee0/0x0003`)
 - Time sync: GB writes the 11-byte time blob to the **Current Time** char
   (`0x2A2B`) — our `_syncTime` matches. **(confirm char in 02.)**

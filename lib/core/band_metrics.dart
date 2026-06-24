@@ -11,23 +11,29 @@ class BandMetrics {
 
   /// Parse a real-time steps notification packet from the Mi Band.
   ///
-  /// Packet layout (fee0 / characteristic 0x0007):
-  ///   [0]       – sub-command byte (ignored)
-  ///   [1..2]    – steps (uint16 little-endian)
-  ///   [3..4]    – unknown / always 0
-  ///   [5..8]    – distance in cm (uint32 little-endian)
-  ///   [9]       – calories
+  /// Mi Band 6 sends a 13-byte packet on fee0/0x0007 (confirmed on-device, e.g.
+  /// `0c 13 00 00 00 0d 00 00 00 01 00 00 00` = 19 steps, 13 m, 1 kcal):
+  ///   [0]       – category/flag byte (ignored)
+  ///   [1..2]    – steps (uint16 little-endian) — the running daily total
+  ///   [3..4]    – unknown / 0
+  ///   [5..8]    – distance in **metres** (uint32 little-endian)
+  ///   [9..12]   – calories (uint32 little-endian)
+  /// Shorter packets carry just the step total.
   static BandMetrics? fromStepsPacket(List<int> data) {
-    if (data.length < 10) return null;
+    if (data.length < 3) return null;
 
     final steps = data[1] | (data[2] << 8);
-    final distanceCm =
-        data[5] | (data[6] << 8) | (data[7] << 16) | (data[8] << 24);
-    final calories = data[9];
+    int distanceMeters = 0;
+    int calories = 0;
+    if (data.length >= 13) {
+      distanceMeters =
+          data[5] | (data[6] << 8) | (data[7] << 16) | (data[8] << 24);
+      calories = data[9] | (data[10] << 8) | (data[11] << 16) | (data[12] << 24);
+    }
 
     return BandMetrics(
       steps: steps,
-      distanceMeters: distanceCm ~/ 100,
+      distanceMeters: distanceMeters,
       calories: calories,
     );
   }

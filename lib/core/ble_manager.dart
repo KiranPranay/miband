@@ -654,12 +654,25 @@ class BLEManager extends ChangeNotifier {
         return;
       }
 
-      // Fetch last 24h of activity data (or since last sync)
-      final since = DateTime.now().subtract(const Duration(days: 1));
+      // Choose the fetch window: backfill a week until we have a few days of
+      // history stored, then fetch incrementally (with a 6 h overlap so gaps
+      // around the boundary are re-pulled). Samples are de-duplicated by
+      // timestamp in the store, so overlap is harmless.
+      final lastSync = activityStore.lastActivitySync;
+      final now = DateTime.now();
+      final earliest = activityStore.samples.isNotEmpty
+          ? activityStore.samples.first.timestamp
+          : now;
+      final haveDeepHistory =
+          earliest.isBefore(now.subtract(const Duration(days: 3)));
+      final since = (lastSync != null && haveDeepHistory)
+          ? lastSync.subtract(const Duration(hours: 6))
+          : now.subtract(const Duration(days: 7));
 
       // One activity fetch yields steps, sleep AND heart-rate history — HR is
       // embedded at byte 3 of each 8-byte sample (see protocol-mb6.md §5).
-      _logger.i('Fetching Activity/Sleep/HR Data since $since');
+      _logger.i('Fetching Activity/Sleep/HR Data since $since '
+          '(deepHistory=$haveDeepHistory)');
       final samples = await _activityFetcher!.fetchActivityData(since);
       if (samples.isNotEmpty) {
         activityStore.addSamples(samples);
@@ -728,27 +741,46 @@ class BLEManager extends ChangeNotifier {
         return;
       }
 
-      _logger.i("Steps: subscribing to 0x0007...");
+      _logger.i("Steps: subscribing to 0x0007 "
+          "(read=${_stepsChar!.properties.read} "
+          "notify=${_stepsChar!.properties.notify})...");
+
+      // Read the current value first — the notify only fires when the count
+      // changes (i.e. while walking), so without an initial read the UI stays
+      // empty when the user is stationary.
+      if (_stepsChar!.properties.read) {
+        try {
+          final initial = await _stepsChar!.read();
+          _logger.i("Steps: initial read raw = ${_hexStr(initial)}");
+          _applyStepsPacket(initial);
+        } catch (e) {
+          _logger.e("Steps: initial read failed: $e");
+        }
+      }
+
       await _stepsChar!.setNotifyValue(true);
       _stepsSubscription?.cancel();
       _stepsSubscription = _stepsChar!.onValueReceived.listen((data) {
-        final parsed = BandMetrics.fromStepsPacket(data);
-        if (parsed != null) {
-          _metrics = parsed;
-          _lastSyncTime = DateTime.now();
-          _logger.d("Steps: ${parsed.steps}, ${parsed.distanceMeters} m, "
-              "${parsed.calories} kcal");
-          // Persist every update so data survives disconnects
-          _storage.saveMetrics(_metrics);
-          _storage.saveLastSyncTime(_lastSyncTime!);
-          notifyListeners();
-        }
+        _logger.d("Steps notify raw = ${_hexStr(data)}");
+        _applyStepsPacket(data);
       });
-
-      // Note: 0x0007 is often notify-only on Mi Band 6.
-      // We rely on the listener above for updates.
     } catch (e) {
       _logger.e("Steps subscription error: $e");
+    }
+  }
+
+  void _applyStepsPacket(List<int> data) {
+    final parsed = BandMetrics.fromStepsPacket(data);
+    if (parsed != null) {
+      _metrics = parsed;
+      _lastSyncTime = DateTime.now();
+      _logger.i("Steps: ${parsed.steps} steps, ${parsed.distanceMeters} m, "
+          "${parsed.calories} kcal");
+      _storage.saveMetrics(_metrics);
+      _storage.saveLastSyncTime(_lastSyncTime!);
+      notifyListeners();
+    } else {
+      _logger.d("Steps: packet not parseable (${data.length} B)");
     }
   }
 
